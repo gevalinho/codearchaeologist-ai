@@ -1,18 +1,22 @@
 # Architecture
 
-CodeArchaeologist AI reconstructs business behavior from source and eventually verifies hypotheses by executing constrained tests. Phase 1 provides the deterministic input boundary and domain contracts; it does not run an investigation agent.
+CodeArchaeologist AI reconstructs business behavior from source and eventually verifies hypotheses by executing constrained tests. Phase 2.1 provides a bounded investigation workflow with separate server-only Meta Model API and Baseten adapters. Executable verification is not implemented.
 
 ## Data flow
 
 1. A trusted server configuration selects an included fixture. The browser will never supply a filesystem path.
 2. The repository inventory reads supported JavaScript and TypeScript files under that fixture, applies limits and exclusions, and records exact paths, content, byte counts, and line counts.
 3. Evidence extraction resolves a file and inclusive line range against the inventory. Rule validation rejects unknown files, invalid ranges, and excerpts that differ from source.
-4. In Phase 2, a bounded orchestrator will supply selected source as untrusted data to a typed Meta model provider, validate structured hypotheses, and record each action. A mock provider will support deterministic tests.
-5. In Phase 3, a constrained test generator will produce verification candidates. A separate isolated runner will execute them and return observed status and output; unavailable isolation yields `BLOCKED`.
-6. The report builder will distinguish source-supported hypotheses from experimentally verified findings.
+4. The bounded orchestrator sends file metadata to the provider for selection, then supplies only selected source (at most three files and 8,000 characters). It validates every cited line against the inspected inventory. A separate model review assesses whether each candidate follows from its evidence; rejected claims are retained with reasons. This semantic review remains fallible, so accepted rules are source-supported candidates, never `VERIFIED`.
+5. The Meta and Baseten adapters implement the same `ModelProvider` interface. A server-only factory requires explicit live provider selection. Each adapter uses its own documented Chat Completions fields and JSON Schema format. Requests have timeouts, up to two transient retries, sanitized errors, and usage and latency accounting. `MockModelProvider` is injected only by tests; there is no mock fallback from live mode.
+6. In Phase 3, a constrained test generator will produce verification candidates. A separate isolated runner will execute them and return observed status and output; unavailable isolation yields `BLOCKED`.
 
-The current fixture, `tests/fixtures/legacy-pricing/pricing.js`, includes loyalty and promotion precedence, rounding, and a shipping threshold. The inventory does not parse syntax yet; module and function indexing is planned for Phase 2.
+The current fixture, `tests/fixtures/legacy-pricing/pricing.js`, includes loyalty and promotion precedence, rounding, and a shipping threshold. The inventory does not parse syntax yet; selection relies on file metadata and bounded source review.
 
 ## Domain contracts
 
-`src/types/investigation.ts` defines investigation lifecycle, inventory, evidence, actions, rules, tests, results, and reports. `src/lib/schemas/investigation.ts` validates evidence and the minimal candidate rule shape at runtime. A verification status means only what its corresponding execution record demonstrates; a model cannot assign `VERIFIED` by inference alone.
+`src/types/investigation.ts` defines investigation lifecycle, inventory, evidence, actions, rules, tests, results, and reports. `src/lib/schemas/investigation.ts` validates evidence and the minimal candidate rule shape at runtime. The orchestrator forces `NOT_TESTED` irrespective of model output. A verification status means only what its corresponding execution record demonstrates.
+
+Meta contract checked against [Meta Chat Completions](https://dev.meta.ai/docs/protocols/chat-completions) and [structured output](https://dev.meta.ai/docs/structured-output): `POST https://api.meta.ai/v1/chat/completions`, bearer key, `model`, `messages`, `response_format.json_schema`, `max_completion_tokens`, and `choices[0].message.content`. The default documented model is `muse-spark-1.3`; set `MODEL_API_KEY`, and optionally `META_MODEL_ID` or `META_MODEL_ENDPOINT`, on the server. No live call was made without credentials.
+
+Baseten contract checked against its [official OpenAPI specification](https://docs.baseten.co/reference/inference-api/llm-openapi-spec.json): `POST https://inference.baseten.co/v1/chat/completions`, bearer key, `model`, `messages` with `system` and `user` roles, `response_format.json_schema`, `max_tokens`, and `choices[0].message.content`. The published Muse Spark Open slug is `meta-models/muse-spark-open`; the user confirmed the hackathon-specific `meta-models/muse-spark-open-1026` from onboarding, so it is the adapter default. See [provider configuration](environment.md).

@@ -42,7 +42,10 @@ export interface CandidateBusinessRule {
   verificationStatus: VerificationStatus;
   test?: GeneratedVerificationTest;
   verification?: VerificationResult;
+  supportStatus?: "SUPPORTED" | "REJECTED";
 }
+export interface RejectedHypothesis { id: string; reason: string }
+export interface ModelTrace { provider: "META" | "BASETEN" | "MOCK"; model: string; calls: number; inputTokens?: number; outputTokens?: number; latencyMs: number }
 export interface AgentAction {
   step: number;
   kind: "INSPECT" | "HYPOTHESIZE" | "REQUEST_EVIDENCE" | "REPORT";
@@ -63,4 +66,6 @@ export interface InvestigationReport {
   summary: string;
   rules: CandidateBusinessRule[];
   limitations: string[];
+  rejectedHypotheses?: RejectedHypothesis[];
+  model?: ModelTrace;
 }

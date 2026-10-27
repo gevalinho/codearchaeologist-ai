@@ -6,7 +6,9 @@ Define types and runtime validation; inventory the included JavaScript fixture w
 
 ## Phase 2 — Meta investigation
 
-First confirm the current Meta Model API endpoint, authentication, request format, response format, and usage fields from provider documentation or account configuration. Implement a typed server-only provider with timeout, bounded retry, latency and usage metrics, and explicit errors. Add a deterministic mock. Build an explicit step-limited orchestrator that chooses evidence from the inventory, validates every source reference, records trace actions, and fails when budget or provider limits are reached. Add tests for invented evidence, malformed output, retry exhaustion, and budget exhaustion.
+Implemented: verified Meta's documented Chat Completions contract; added a typed server-only provider, bounded retries and timeouts, usage and latency metrics, deterministic mock, three-call investigation flow, validated references, model-assisted support review, trace, and failure states. `tests/investigation.test.ts` runs the complete original fixture workflow in explicit `MOCK` mode. Live mode needs a valid `MODEL_API_KEY` and has not been exercised against an account. A future phase should add a trusted fixture registry and syntax-aware entry-point indexing.
+
+Phase 2.1 adds a separate Baseten Model APIs adapter, explicit live provider selection, deterministic HTTP boundary tests, and an opt-in live smoke test against the same fixture. Public documentation confirms the endpoint and public Muse Spark Open slug; the user confirmed the hackathon-specific `-1026` slug from onboarding, and it is the default. No paid call is part of normal tests. See [environment configuration](environment.md).
 
 ## Phase 3 — Executable verification
 
