@@ -5,7 +5,7 @@ import path from "node:path";
 vi.mock("server-only", () => ({}));
 import { inventoryFixture } from "../src/lib/repository/inventory";
 import { extractEvidence } from "../src/lib/repository/evidence";
-import { PRICING_TEMPLATES, type PricingTemplate } from "../src/lib/verification/pricing-templates";
+import { PRICING_TEMPLATES, matchPricingTemplate, type PricingTemplate } from "../src/lib/verification/pricing-templates";
 import { DockerPricingSandbox, executeDockerCommand, type CommandExecutor, type SandboxRunner } from "../src/lib/verification/docker-sandbox";
 import { verifyInvestigation } from "../src/lib/verification/verification-engine";
 import { investigateAndVerify } from "../src/lib/verification/investigate-and-verify";
@@ -25,6 +25,54 @@ function report(source: RepositoryInventory, rules: CandidateBusinessRule[]): In
 const goodOutput = (cases: readonly { id: string; expected: unknown }[]) => JSON.stringify({ observations: cases.map((item) => ({ id: item.id, ...(item.expected as object) })) });
 
 describe("trusted verification engine", () => {
+  it("matches the sanitized saved Muse subtotal claim only to reviewed cases", async () => {
+    const source = await inventory();
+    const savedClaim: CandidateBusinessRule = {
+      id: "claim",
+      explanation: "subtotalCents must be an integer >= 0 or throws 'Invalid subtotal'",
+      preconditions: [],
+      expectedBehavior: { description: "function enforces validation on subtotalCents input" },
+      confidence: 0.9,
+      evidence: [extractEvidence(source, "pricing.js", 3, 3)],
+      supportStatus: "SUPPORTED",
+      verificationStatus: "NOT_TESTED",
+    };
+    expect(matchPricingTemplate(savedClaim, source)?.id).toBe("invalid-subtotal");
+    const runner = { run: vi.fn(async (cases: readonly { id: string; expected: unknown }[]) => ({ kind: "EXECUTED" as const, stdout: goodOutput(cases), stderr: "", exitCode: 0, durationMs: 1 })) };
+    const result = await verifyInvestigation(report(source, [savedClaim]), runner);
+    expect(runner.run).toHaveBeenCalledOnce();
+    expect(runner.run.mock.calls[0][0].map((item) => item.id)).toEqual(["negative-subtotal", "fractional-subtotal"]);
+    expect(result.rules[0].verificationStatus).toBe("VERIFIED");
+    expect(result.rules[0].verification?.cases).toHaveLength(2);
+  });
+  it("rejects misleading, contradictory, unsupported, and unpinned subtotal claims", async () => {
+    const source = await inventory();
+    const base: CandidateBusinessRule = {
+      id: "claim", explanation: "subtotalCents must be an integer >= 0 or throws 'Invalid subtotal'",
+      preconditions: [], expectedBehavior: { description: "function enforces validation on subtotalCents input" },
+      confidence: 0.9, evidence: [extractEvidence(source, "pricing.js", 3, 3)],
+      supportStatus: "SUPPORTED", verificationStatus: "NOT_TESTED",
+    };
+    const rejected: CandidateBusinessRule[] = [
+      { ...base, evidence: [extractEvidence(source, "pricing.js", 4, 4)] },
+      { ...base, evidence: [{ ...base.evidence[0], excerpt: "invented source" }] },
+      { ...base, explanation: "promoCode throws Invalid subtotal" },
+      { ...base, explanation: "subtotalCents may be fractional or throws 'Invalid subtotal'" },
+      { ...base, expectedBehavior: { description: "function accepts fractional subtotalCents input" } },
+      { ...base, supportStatus: "REJECTED" },
+      { ...base, verificationStatus: "VERIFIED" },
+      { ...base, verificationCases: PRICING_TEMPLATES[5].cases.map((item) => ({ ...item })) },
+      { ...base, test: { id: "untrusted", description: "AI supplied", source: "untrusted code" } },
+      { ...base, preconditions: [{ description: "unreviewed" }] },
+    ];
+    for (const claim of rejected) expect(matchPricingTemplate(claim, source)).toBeUndefined();
+    expect(matchPricingTemplate(base, { ...source, fixtureId: "other" })).toBeUndefined();
+    expect(matchPricingTemplate(base, { ...source, files: [{ ...source.files[0], content: `${source.files[0].content}\n` }] })).toBeUndefined();
+    const runner = { run: vi.fn() };
+    const result = await verifyInvestigation(report(source, rejected), runner);
+    expect(result.rules.every((item) => item.verificationStatus === "NOT_TESTED")).toBe(true);
+    expect(runner.run).not.toHaveBeenCalled();
+  });
   it("verifies every reviewed pricing template against observed cases", async () => {
     const source = await inventory();
     const sandbox: SandboxRunner = { run: async (cases) => ({ kind: "EXECUTED", stdout: goodOutput(cases), stderr: "", exitCode: 0, durationMs: 12 }) };
@@ -74,7 +122,7 @@ describe("trusted verification engine", () => {
   });
   it("keeps Phase 2 behavior and opts into verification explicitly", async () => {
     const template = PRICING_TEMPLATES[0];
-    const provider = new MockModelProvider([{ paths: ["pricing.js"] }, { rules: [{ id: template.id, explanation: template.explanation, preconditions: [{ description: template.precondition }], expectedBehavior: { description: template.outcome }, confidence: 0.9, evidence: [{ path: "pricing.js", startLine: 5, endLine: 5 }] }] }, { assessments: [{ id: template.id, supported: true, reason: "Line 5 supports it" }] }]);
+    const provider = new MockModelProvider([{ rules: [{ id: template.id, explanation: template.explanation, preconditions: [{ description: template.precondition }], expectedBehavior: { description: template.outcome }, confidence: 0.9, evidence: [{ path: "pricing.js", startLine: 5, endLine: 5 }] }] }, { assessments: [{ id: template.id, supported: true, reason: "Line 5 supports it" }] }]);
     const sandbox: SandboxRunner = { run: async (cases) => ({ kind: "EXECUTED", stdout: goodOutput(cases), stderr: "", exitCode: 0, durationMs: 1 }) };
     const result = await investigateAndVerify({ fixtureId: "legacy-pricing", fixtureRoot, provider }, sandbox);
     expect(result.model?.provider).toBe("MOCK");

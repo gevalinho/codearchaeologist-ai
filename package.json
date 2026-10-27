@@ -8,7 +8,10 @@
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "demo:report": "node --env-file=.env.local --experimental-transform-types --import ./scripts/register-types.mjs scripts/generate-demo-report.ts",
+    "demo:reverify": "node --experimental-transform-types --import ./scripts/register-types.mjs scripts/reverify-demo-report.ts",
+    "archaeology:scan": "node --experimental-transform-types --import ./scripts/register-types.mjs scripts/scan-archaeology.ts"
   },
   "dependencies": {
     "next": "16.4.3",

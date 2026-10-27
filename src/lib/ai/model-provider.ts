@@ -29,6 +29,8 @@ export interface ModelDiagnostics {
   outputTokens?: number;
   reasoningTokens?: number;
 }
+export type SafeFinishReason = "stop" | "length" | "content_filter" | "tool_calls" | "unknown";
+export interface SafeCompletionMetadata { finishReason: SafeFinishReason; outputTokens?: number; reasoningTokens?: number }
 export class ModelProviderError extends Error {
   constructor(readonly code: "CONFIG" | "TIMEOUT" | "HTTP" | "MALFORMED" | "NETWORK" | "INCOMPLETE", message: string, readonly diagnostics?: ModelDiagnostics) {
     super(message);

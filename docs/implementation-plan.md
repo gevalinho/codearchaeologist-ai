@@ -18,6 +18,6 @@ Limitations: only exact reviewed claims for the pinned fixture can be verified. 
 
 ## Phase 4 — Demonstration
 
-Expose only registered fixtures through an investigation API. Build a compact flow for selection, progress, rules, evidence, tests, and results. Test the end-to-end workflow with a live Meta model and a configured sandbox, then document a reproducible three-minute demonstration.
+Implemented: a responsive source and findings workbench; a fixture-only, opt-in live investigation API; an operator-only Docker verification command; and a validated local report viewer. The browser cannot trigger Docker execution. Live inference and Docker verification require explicit operator action and have not been run as part of automated tests. See [local demo instructions](demo.md).
 
 Each phase ends with type generation, type checking, linting, relevant automated tests, and production build. No commit, push, merge, or deployment occurs without user approval.

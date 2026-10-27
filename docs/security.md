@@ -1,5 +1,11 @@
 # Security boundaries
 
+## Implemented in Phase 4
+
+- The dashboard accepts no repository path, upload, command, or code. The investigation POST route is disabled by default (`ENABLE_LIVE_INVESTIGATION_HTTP=1` enables it for a trusted local demo), checks same-origin requests, accepts only the fixed fixture identifier, limits request size, applies a 31-second route deadline, and permits one in-process request per minute. The existing provider factory requires explicit `baseten` or `meta`; errors are sanitized. This in-memory limit is not a distributed or durable rate limiter, so the route must remain limited to a trusted local environment.
+- No HTTP route invokes the Docker sandbox. Verification is initiated only by the trusted operator CLI. The artifact path is fixed, ignored by Git, and written with owner-only permissions. The CLI strips raw runner output and generated test source before writing, and never prints provider error details or credentials.
+- The report GET route reads only the fixed local artifact (100 KB maximum), validates the pinned fixture hash, exact source evidence, reviewed cases, and status/provenance consistency. `MOCK` provenance and fabricated `VERIFIED` cases are rejected. The artifact remains local and should be treated as operator-produced data, not a cryptographic proof against a malicious local file editor.
+
 ## Implemented in Phase 1
 
 - Inventory callers must select a trusted fixture root server-side. No HTTP endpoint accepts filesystem paths.
@@ -13,7 +19,7 @@
 
 - The Meta adapter imports `server-only`; credentials are read from server environment or constructor injection and are never logged or returned. Its endpoint must be HTTPS.
 - The orchestrator allows three model calls, three inspected files, 8,000 selected source characters, five rules, three references per rule, 12 lines per reference, and a 30-second overall deadline. Each request caps output at 1,500 tokens. The provider caps request time at 12 seconds and retries transient errors twice with backoff.
-- Model-selected paths and citations are validated against actual inventoried and inspected files. Source excerpts are extracted locally, never accepted from model text. Comments and strings are explicitly framed as untrusted data; there is no tool-execution interface.
+- The sole eligible file in a one-file inventory is selected deterministically and recorded as such. Multi-file model selections are constrained to an explicit inventory allowlist and validated for nonempty, unique, safe paths; invalid selections fail without repair. Citations are validated against inspected files. Source excerpts are extracted locally, never accepted from model text. Comments and strings are explicitly framed as untrusted data; there is no tool-execution interface.
 - A second model call reviews semantic support. This can reject contradictory claims but is not a proof of behavior. Accepted claims remain `NOT_TESTED` and reports describe the uncertainty. Malformed responses and provider failures fail explicitly.
 - Baseten uses an independent server-only adapter and `BASETEN_API_KEY`. Provider selection is explicit; the live factory rejects mock or missing selection. The paid smoke test is opt-in and sends only the trusted legacy-pricing fixture.
 

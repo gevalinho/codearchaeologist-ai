@@ -4,6 +4,7 @@ vi.mock("server-only", () => ({}));
 import { BasetenModelProvider } from "../src/lib/ai/baseten-provider";
 import { createLiveModelProvider } from "../src/lib/ai/provider-selection";
 import { investigateFixture } from "../src/lib/agents/investigation-orchestrator";
+import { buildOperatorArtifact, formatOperatorDiagnostic } from "../src/lib/demo/operator-workflow";
 
 const request = { name: "selection", instructions: "Choose a file", input: '{"files":["pricing.js"]}', schema: { type: "object", properties: { paths: { type: "array", items: { type: "string" } } }, required: ["paths"], additionalProperties: false }, maxOutputTokens: 100, signal: new AbortController().signal };
 const payload = { model: "meta-models/muse-spark-open-1026", choices: [{ message: { content: '{"paths":["pricing.js"]}' }, finish_reason: "stop" }], usage: { prompt_tokens: 14, completion_tokens: 6 } };
@@ -30,17 +31,44 @@ describe("Baseten provider HTTP boundary", () => {
     expect(JSON.parse(fetcher.mock.calls[0][1]?.body as string).model).toBe("meta-models/muse-spark-open");
   });
   it("runs the fixture workflow through Baseten's HTTP shape without a paid call", async () => {
-    const selections = [{ paths: ["pricing.js"] }, { rules: [{ id: "loyalty", explanation: "Five-year customers receive a 15% discount", preconditions: [{ description: "customerYears >= 5" }], expectedBehavior: { description: "discountPercent is 15" }, confidence: 0.9, evidence: [{ path: "pricing.js", startLine: 5, endLine: 5 }] }] }, { assessments: [{ id: "loyalty", supported: true, reason: "Line 5 assigns 15" }] }];
-    const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ...payload, choices: [{ message: { content: JSON.stringify(selections.shift()) }, finish_reason: "stop" }] }), { status: 200 }));
+    const selections = [{ rules: [{ id: "loyalty", explanation: "Five-year customers receive a 15% discount", preconditions: [{ description: "customerYears >= 5" }], expectedBehavior: { description: "discountPercent is 15" }, confidence: 0.9, evidence: [{ path: "pricing.js", startLine: 5, endLine: 5 }] }] }, { assessments: [{ id: "loyalty", supported: true, reason: "Line 5 assigns 15" }] }];
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ...payload, choices: [{ message: { content: JSON.stringify(selections.shift()) }, finish_reason: "stop" }], usage: { ...payload.usage, completion_tokens_details: { reasoning_tokens: 3 } } }), { status: 200 }));
     const report = await investigateFixture({ fixtureId: "legacy-pricing", fixtureRoot: path.resolve("tests/fixtures/legacy-pricing"), provider: new BasetenModelProvider({ apiKey: "test-key", fetcher, maxRetries: 0 }) });
-    expect(fetcher).toHaveBeenCalledTimes(3);
-    expect(report.model).toMatchObject({ provider: "BASETEN", model: "meta-models/muse-spark-open-1026", calls: 3, inputTokens: 42, outputTokens: 18 });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.map(([, init]) => JSON.parse(init?.body as string).max_tokens)).toEqual([3_000, 1_500]);
+    expect(report.model).toMatchObject({ provider: "BASETEN", model: "meta-models/muse-spark-open-1026", calls: 2, inputTokens: 28, outputTokens: 12, reasoningTokens: 6 });
+    expect(report.selection).toEqual({ method: "DETERMINISTIC_SINGLE_FILE", paths: ["pricing.js"] });
     expect(report.rules[0]).toMatchObject({ id: "loyalty", verificationStatus: "NOT_TESTED" });
     expect(report.rules[0].evidence[0].excerpt).toContain("discountPercent = 15");
   });
   it("rejects length even when JSON content is syntactically complete", async () => {
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ ...payload, choices: [{ message: { content: "{}" }, finish_reason: "length" }], usage: { prompt_tokens: 14, completion_tokens: 256, completion_tokens_details: { reasoning_tokens: 245 } } }), { status: 200 }));
     await expect(new BasetenModelProvider({ apiKey: "test-key", fetcher, maxRetries: 0 }).complete(request)).rejects.toMatchObject({ code: "INCOMPLETE", diagnostics: { httpStatus: 200, finishReason: "length", contentPresent: true, contentLength: 2, outputTokens: 256, reasoningTokens: 245, model: payload.model } });
+  });
+  it("carries a length completion and bounded usage through the operator diagnostics", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({ ...payload, choices: [{ message: { content: "{}" }, finish_reason: "length" }], usage: { completion_tokens: 1500, completion_tokens_details: { reasoning_tokens: 1400 } } }), { status: 200 }));
+    const provider = new BasetenModelProvider({ apiKey: "secret-test-value", fetcher, maxRetries: 0 });
+    const caught = await buildOperatorArtifact(provider, { run: vi.fn() }).catch((error: unknown) => error);
+    const output = formatOperatorDiagnostic(caught, "CONFIGURATION");
+    expect(output).toBe("Failure stage: INVESTIGATION\nInvestigation step: CANDIDATE_RULES\nError category: PROVIDER_INCOMPLETE\nHTTP status: 200\nFinish reason: length\nOutput tokens: 1500\nReasoning tokens: 1400\n");
+    expect(output).not.toContain("secret-test-value");
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+  it("maps missing or malformed completion metadata to unknown and omits invalid counts", async () => {
+    for (const response of [
+      { choices: [{ message: { content: "{}" } }], usage: { completion_tokens: -1, completion_tokens_details: { reasoning_tokens: "999" } } },
+      { choices: [{ message: { content: "{}" }, finish_reason: { untrusted: "raw secret" } }], usage: { completion_tokens: 1.5, completion_tokens_details: { reasoning_tokens: 1_000_001 } } },
+      { choices: [{ message: { content: "{}" }, finish_reason: "untrusted_reason" }], usage: { completion_tokens: "1500", completion_tokens_details: { reasoning_tokens: -3 } } },
+    ]) {
+      const fetcher = vi.fn(async () => new Response(JSON.stringify(response), { status: 200 }));
+      const provider = new BasetenModelProvider({ apiKey: "test-key", fetcher, maxRetries: 0 });
+      const caught = await buildOperatorArtifact(provider, { run: vi.fn() }).catch((error: unknown) => error);
+      const output = formatOperatorDiagnostic(caught, "CONFIGURATION");
+      expect(output).toContain("Finish reason: unknown\n");
+      expect(output).not.toContain("Output tokens:");
+      expect(output).not.toContain("Reasoning tokens:");
+      expect(output).not.toContain("raw secret");
+    }
   });
   it("rejects missing finish reason, missing content, and unsupported reasons", async () => {
     const cases = [

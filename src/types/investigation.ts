@@ -51,7 +51,7 @@ export interface CandidateBusinessRule {
   supportStatus?: "SUPPORTED" | "REJECTED";
 }
 export interface RejectedHypothesis { id: string; reason: string }
-export interface ModelTrace { provider: "META" | "BASETEN" | "MOCK"; model: string; calls: number; inputTokens?: number; outputTokens?: number; latencyMs: number }
+export interface ModelTrace { provider: "META" | "BASETEN" | "MOCK"; model: string; calls: number; inputTokens?: number; outputTokens?: number; reasoningTokens?: number; latencyMs: number }
 export interface AgentAction {
   step: number;
   kind: "INSPECT" | "HYPOTHESIZE" | "REQUEST_EVIDENCE" | "REPORT" | "VERIFY";
@@ -69,6 +69,7 @@ export interface Investigation {
 export interface InvestigationReport {
   investigation: Investigation;
   inventory: RepositoryInventory;
+  selection?: { method: "DETERMINISTIC_SINGLE_FILE" | "MODEL"; paths: string[] };
   summary: string;
   rules: CandidateBusinessRule[];
   limitations: string[];

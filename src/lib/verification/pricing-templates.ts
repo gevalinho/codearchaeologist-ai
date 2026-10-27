@@ -86,18 +86,36 @@ export const PRICING_TEMPLATES: readonly PricingTemplate[] = [
 
 const normalized = (value: string) => value.trim().replace(/\s+/g, " ").toLowerCase();
 
+// Only these reviewed, equivalent claims may use the empty-precondition path.
+// Matching both fields prevents a line citation or error-string mention alone
+// from selecting executable cases.
+const subtotalValidationExplanations = new Set([
+  "subtotalCents must be an integer >= 0 or throws 'Invalid subtotal'",
+  "negative or fractional subtotalCents values throw 'Invalid subtotal'",
+].map(normalized));
+const subtotalValidationOutcomes = new Set([
+  "function enforces validation on subtotalCents input",
+  "invoiceTotal rejects negative and fractional subtotalCents with 'Invalid subtotal'",
+].map(normalized));
+
 export function isTrustedPricingInventory(inventory: RepositoryInventory): boolean {
   if (inventory.fixtureId !== "legacy-pricing" || inventory.files.length !== 1 || inventory.files[0]?.path !== "pricing.js") return false;
   return createHash("sha256").update(inventory.files[0].content).digest("hex") === PRICING_SOURCE_SHA256;
 }
 
 export function matchPricingTemplate(rule: CandidateBusinessRule, inventory: RepositoryInventory): PricingTemplate | undefined {
-  if (!isTrustedPricingInventory(inventory) || rule.supportStatus !== "SUPPORTED" || rule.verificationStatus !== "NOT_TESTED" || rule.verification || rule.test || rule.preconditions.length !== 1) return undefined;
+  if (!isTrustedPricingInventory(inventory) || rule.supportStatus !== "SUPPORTED" || rule.verificationStatus !== "NOT_TESTED" || rule.verification || rule.test) return undefined;
   try { rule.evidence.forEach((evidence) => validateEvidence(inventory, evidence)); } catch { return undefined; }
-  return PRICING_TEMPLATES.find((template) =>
+  const strictMatch = rule.preconditions.length === 1 ? PRICING_TEMPLATES.find((template) =>
     normalized(rule.explanation) === normalized(template.explanation) &&
     normalized(rule.preconditions[0].description) === normalized(template.precondition) &&
     normalized(rule.expectedBehavior.description) === normalized(template.outcome) &&
     template.requiredLines.every((line) => rule.evidence.some((e) => e.path === "pricing.js" && e.startLine <= line && e.endLine >= line && e.excerpt === inventory.files[0].content.split("\n").slice(e.startLine - 1, e.endLine).join("\n")))
-  );
+  ) : undefined;
+  if (strictMatch) return strictMatch;
+  if (rule.preconditions.length !== 0 || rule.verificationCases !== undefined ||
+      !subtotalValidationExplanations.has(normalized(rule.explanation)) ||
+      !subtotalValidationOutcomes.has(normalized(rule.expectedBehavior.description)) ||
+      !rule.evidence.some((e) => e.path === "pricing.js" && e.startLine <= 3 && e.endLine >= 3)) return undefined;
+  return PRICING_TEMPLATES.find((template) => template.id === "invalid-subtotal");
 }
