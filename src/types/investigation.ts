@@ -25,12 +25,17 @@ export interface RepositoryInventory {
 export interface Precondition { description: string }
 export interface ExpectedBehavior { description: string }
 export interface GeneratedVerificationTest { id: string; description: string; source: string }
+export interface PricingInput { subtotalCents: number; customerYears: number; promoCode: string | null }
+export type ExpectedObservation = { kind: "return"; value: number } | { kind: "throw"; message: string };
+export interface VerificationCase { id: string; description: string; input: PricingInput; expected: ExpectedObservation }
+export interface CaseObservation { id: string; input: PricingInput; expected: ExpectedObservation; observed?: ExpectedObservation; passed: boolean }
 export interface VerificationResult {
   status: VerificationStatus;
   durationMs?: number;
   exitCode?: number;
   output?: string;
   reason?: string;
+  cases?: CaseObservation[];
 }
 export interface CandidateBusinessRule {
   id: string;
@@ -42,13 +47,14 @@ export interface CandidateBusinessRule {
   verificationStatus: VerificationStatus;
   test?: GeneratedVerificationTest;
   verification?: VerificationResult;
+  verificationCases?: VerificationCase[];
   supportStatus?: "SUPPORTED" | "REJECTED";
 }
 export interface RejectedHypothesis { id: string; reason: string }
 export interface ModelTrace { provider: "META" | "BASETEN" | "MOCK"; model: string; calls: number; inputTokens?: number; outputTokens?: number; latencyMs: number }
 export interface AgentAction {
   step: number;
-  kind: "INSPECT" | "HYPOTHESIZE" | "REQUEST_EVIDENCE" | "REPORT";
+  kind: "INSPECT" | "HYPOTHESIZE" | "REQUEST_EVIDENCE" | "REPORT" | "VERIFY";
   detail: string;
   at: string;
 }

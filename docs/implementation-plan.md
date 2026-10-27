@@ -12,7 +12,9 @@ Phase 2.1 adds a separate Baseten Model APIs adapter, explicit live provider sel
 
 ## Phase 3 — Executable verification
 
-Constrain generated tests to a documented fixture contract. Implement a hardened container runner with network disabled, read-only input, limited privileges, CPU, memory, and execution time. Capture actual exit code, output, and duration. Return `BLOCKED` when the backend is absent. Test pass, fail, blocked, and timeout behavior.
+Implemented: reviewed declarative pricing templates with boundary cases for loyalty, promotion precedence, rounding, shipping, and invalid subtotals; strict rule-to-template and source-hash matching; an opt-in `investigateAndVerify` workflow; and a server-only Docker runner with no network, read-only source, non-root identity, dropped capabilities, seccomp, CPU, memory, process, and time limits. The runner compares actual outputs with explicit expectations and reports `VERIFIED`, `FAILED`, `BLOCKED`, or `NOT_TESTED` locally, with case inputs, observations, and reasons. Deterministic tests cover success, mismatch, unsupported claims, missing isolation, timeout, and malformed output. An opt-in local Docker integration test executes the fixture without a model call.
+
+Limitations: only exact reviewed claims for the pinned fixture can be verified. Other model phrasings remain `NOT_TESTED`. The results establish behavior for the recorded cases, not a universal proof of the rule. The local `node:22-bookworm-slim` image and a Docker daemon with seccomp are prerequisites.
 
 ## Phase 4 — Demonstration
 
