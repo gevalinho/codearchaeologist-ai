@@ -1,0 +1,15 @@
+# Feature intelligence
+
+The browser builds feature candidates from an imported graph. `discoverFeatures` tokenizes component names and creates stable `feature:<term>` identifiers for repeated terms. `investigateFeature` adds directly incident graph edges and their other endpoints. Components included only by requested names are marked `name-match`; they do not create edges. All results are sorted deterministically.
+
+`FeatureInvestigation` records its description and explanation as claims with explicit provenance (`graph-node`, `graph-edge`, `name-match`, or `operator-note`), node and edge IDs, source references, and certainty. It also includes components, recorded relationships, business-rule evidence, unresolved questions, coverage limits, missing names, and map-readiness counts.
+
+The Student Promotion investigation searches the imported graph for promotion components and known related names. Reported active-session, destination-class, date, membership, and score-limit details are operator notes awaiting source review. Guard edges show that the scanner found a condition pattern; they do not reveal the condition or prove runtime behavior. Score-entry components remain naming associations unless recorded graph edges connect them to promotion.
+
+Use `/architecture`, import `.local-archaeology/graph.json`, then choose a candidate in Feature Intelligence. Selecting a component or recorded relationship focuses the graph and exposes its source reference in the evidence inspector. No graph or source data is uploaded or stored by this feature.
+
+Phase 5.3B ranks components into Core, Supporting, and Related tiers. A feature-named entry point with an observed edge can be Core; shared infrastructure stays Supporting even when connected. Name-only matches remain Related. Each component shows the ranking reason and source reference. These tiers guide review and do not establish runtime execution.
+
+The compact workspace has Legacy, Modern, and Compare perspectives. Legacy keeps the imported graph and recorded edges, with supporting components, related candidates, and detailed evidence behind expandable sections. Modern generates a `ModernizationBlueprint` using `deterministic-template-v1`: stable proposal IDs, a target architecture, proposed components and responsibilities, design mappings, assumptions, decisions, and verification requirements. Every proposal is labeled as a recommendation. Compare shows the exact legacy node and source references beside its proposed placement. Switching perspectives does not alter graph selection or viewport state.
+
+The initial target is React/Next.js with a layered backend. The proposed flow is conceptual and contains no verified eligibility, authorization, transaction, or score policy. A future target such as Next.js plus Spring Boot can supply a different `TargetArchitecture` while retaining the feature investigation and evidence contract. The next phase should review method bodies and tests, then promote only confirmed rules into a blueprint with explicit source and runtime verification.
