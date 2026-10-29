@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { beginLogin, finishLogin, LoginFailure, repositoriesForUser, authorizeRepository } from "../src/lib/github-ingestion/app";
 import { cookieHeader, createSession, currentSession, nonce, revokeSession, seal, unseal, type UserSession } from "../src/lib/github-ingestion/session";
 import { acquirePublicRepository } from "../src/lib/github-ingestion/acquire";
 import { GitHubJobManager, type JobDependencies } from "../src/lib/github-ingestion/jobs";
 import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import demoGraph from "./fixtures/architecture/demo-graph.json";
@@ -17,6 +18,10 @@ const roots: string[] = [];
 const user = (id = "1"): UserSession => ({ id, login: `developer${id}`, token: `user-token-${id}-long`, expiresAt: Date.now() + 60_000, nonce: nonce() });
 const encoded = (value: unknown) => Buffer.from(JSON.stringify(value));
 const repository = { id: 42, owner: "owner", name: "private-repo", private: true, installationId: 9 };
+beforeEach(() => {
+  const root = mkdtempSync(path.join(tmpdir(), "codearch-session-test-")); roots.push(root);
+  Object.assign(process.env, { CODEARCH_DB_PATH: path.join(root, "sessions.sqlite"), CODEARCH_TOKEN_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"), CODEARCH_TOKEN_KEY_VERSION: "1" });
+});
 afterEach(async () => { process.env = { ...env }; await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 
 describe("GitHub App OAuth and sessions", () => {

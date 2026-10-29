@@ -1,5 +1,6 @@
 import "server-only";
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { SqliteSessionStore, sessionEncryptionKey, sessionKeyVersion } from "./session-store";
 
 export const SESSION_COOKIE = "codearch_github_session";
 export const OAUTH_COOKIE = "codearch_github_oauth";
@@ -25,18 +26,22 @@ export function cookieHeader(name: string, value: string, maxAge = MAX_AGE): str
 export function sameOrigin(request: Request): boolean { const origin = process.env.GITHUB_APP_ORIGIN; return !!origin && request.headers.get("origin") === origin && (!request.headers.get("sec-fetch-site") || request.headers.get("sec-fetch-site") === "same-origin"); }
 export const privateJson = (value: object, status = 200) => Response.json(value, { status, headers: { "Cache-Control": "private, no-store" } });
 
-const sessionsKey = Symbol.for("codearchaeologist.github-app.sessions");
-const shared = globalThis as typeof globalThis & { [sessionsKey]?: Map<string, UserSession> };
-const sessions = shared[sessionsKey] ??= new Map<string, UserSession>();
-export function createSession(user: UserSession): string {
-  for (const [key, value] of sessions) if (value.expiresAt <= Date.now()) sessions.delete(key);
-  if (sessions.size >= 100) throw new Error("GitHub App session capacity reached.");
-  const handle = nonce(); sessions.set(handle, user); return handle;
+let store: { file: string; fingerprint: string; database: SqliteSessionStore } | undefined;
+function sessions(): SqliteSessionStore {
+  const file = process.env.CODEARCH_DB_PATH;
+  if (!file) throw new Error("GitHub session database is unavailable.");
+  const key = sessionEncryptionKey(process.env.CODEARCH_TOKEN_ENCRYPTION_KEY);
+  const version = sessionKeyVersion(process.env.CODEARCH_TOKEN_KEY_VERSION);
+  const fingerprint = createHash("sha256").update(key).update(String(version)).digest("hex");
+  if (store?.file === file && store.fingerprint === fingerprint) return store.database;
+  store?.database.close();
+  store = { file, fingerprint, database: new SqliteSessionStore(file, key, version) };
+  return store.database;
 }
-export function revokeSession(request: Request): void { const handle = cookieValue(request, SESSION_COOKIE); if (handle) sessions.delete(handle); }
+export function createSession(user: UserSession): string {
+  return sessions().create(user);
+}
+export function revokeSession(request: Request): void { sessions().revoke(cookieValue(request, SESSION_COOKIE)); }
 export function currentSession(request: Request): UserSession | null {
-  const handle = cookieValue(request, SESSION_COOKIE);
-  const value = handle && /^[A-Za-z0-9_-]{43}$/.test(handle) ? sessions.get(handle) : undefined;
-  if (!value || value.expiresAt <= Date.now()) { if (handle) sessions.delete(handle); return null; }
-  return value;
+  return sessions().lookup(cookieValue(request, SESSION_COOKIE));
 }

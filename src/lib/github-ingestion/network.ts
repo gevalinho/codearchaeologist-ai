@@ -12,6 +12,9 @@ export class OAuthNetworkFailure extends Error {
     super("GitHub OAuth token exchange failed."); this.name = "OAuthNetworkFailure";
   }
 }
+export class GitHubHttpFailure extends Error {
+  constructor(readonly status: number) { super(`GitHub request failed with HTTP ${status}.`); this.name = "GitHubHttpFailure"; }
+}
 const providerCodes = new Set(["incorrect_client_credentials", "redirect_uri_mismatch", "bad_verification_code", "bad_refresh_token", "access_denied", "invalid_request", "unsupported_grant_type", "unverified_user_email"]);
 export function safeOAuthProviderCode(value: unknown): string | undefined { return typeof value === "string" && providerCodes.has(value) ? value : undefined; }
 export function oauthProviderCode(body: Buffer): string | undefined {
@@ -50,7 +53,7 @@ export function requireSuccessfulGitHubStatus(status: number, method: "GET" | "P
   if (status >= 300 && status < 400) throw new Error("GitHub redirected to an unapproved destination.");
   if (status === 403 || status === 429) throw new Error("GitHub rate limit or access policy blocked this request. Retry later.");
   if (status === 404) throw new Error("Public GitHub repository or source file was not found.");
-  if (status !== 200 && !(method === "POST" && status === 201)) throw new Error(`GitHub request failed with HTTP ${status}.`);
+  if (status !== 200 && !(method === "POST" && status === 201)) throw new GitHubHttpFailure(status);
 }
 
 /** A renamed public repository's metadata endpoint may move to GitHub's numeric API identity. */
