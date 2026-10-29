@@ -4,8 +4,9 @@ export type RepositoryAnswer = { schemaVersion: "1.0.0"; status: "observed-struc
 export type RepositoryValidationCategory = "structure" | "classification" | "unsafe_text" | "citation_limit" | "citation_unknown" | "citation_missing" | "candidate_anchor" | "purpose_anchors" | "insufficient_evidence";
 export type RepositoryTextField = "answer" | "uncertainty";
 export type RepositoryTextRule = "control_character" | "html_delimiter" | "unsafe_url" | "source_reference";
+export type RepositoryAnswerRule = "citations_present" | "answer_prefix";
 export class RepositoryAnswerValidationError extends Error {
-  constructor(readonly category: RepositoryValidationCategory, readonly field?: RepositoryTextField, readonly rule?: RepositoryTextRule) { super("Invalid repository answer."); this.name = "RepositoryAnswerValidationError"; }
+  constructor(readonly category: RepositoryValidationCategory, readonly field?: RepositoryTextField, readonly rule?: RepositoryTextRule, readonly answerRule?: RepositoryAnswerRule) { super("Invalid repository answer."); this.name = "RepositoryAnswerValidationError"; }
 }
 const invalid = (category: RepositoryValidationCategory): never => { throw new RepositoryAnswerValidationError(category); };
 const sourceLike = /(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.(?:php|js|jsx|ts|tsx|py|java|cs)(?::\d+(?:-\d+)?)?/gi;
@@ -16,7 +17,7 @@ function validateText(text: string, field: RepositoryTextField, packet: Reposito
   if (/\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.|javascript:|data:|file:)/i.test(text) || /\]\s*\(/.test(text)) reject("unsafe_url");
   for (const match of text.matchAll(sourceLike)) {
     const reference = match[0];
-    if (!packet.items.some(item => cited.has(item.id) && `${item.source.path}:${item.source.startLine}${item.source.endLine === item.source.startLine ? "" : `-${item.source.endLine}`}` === reference)) reject("source_reference");
+    if (match.index > 0 && /[/\\]/.test(text[match.index - 1]) || !packet.items.some(item => cited.has(item.id) && `${item.source.path}:${item.source.startLine}${item.source.endLine === item.source.startLine ? "" : `-${item.source.endLine}`}` === reference)) reject("source_reference");
   }
 }
 export const repositoryChatSchema = { type: "object", additionalProperties: false, required: ["schemaVersion", "status", "answer", "evidenceIds", "uncertainty"], properties: { schemaVersion: { type: "string", enum: ["1.0.0"] }, status: { type: "string", enum: ["observed-structure", "inference", "suggestion", "insufficient-evidence"] }, answer: { type: "string" }, evidenceIds: { type: "array", items: { type: "string" } }, uncertainty: { type: "string" } } };
@@ -36,7 +37,8 @@ export function parseRepositoryAnswer(value: unknown, packet: RepositoryEvidence
   validateText(answerText, "answer", packet, cited);
   validateText(uncertainty, "uncertainty", packet, cited);
   if (answer.status === "insufficient-evidence") {
-    if (evidenceIds.length !== 0 || !/^insufficient evidence/i.test(answerText)) invalid("insufficient_evidence");
+    if (evidenceIds.length !== 0) throw new RepositoryAnswerValidationError("insufficient_evidence", undefined, undefined, "citations_present");
+    if (!/^insufficient evidence/i.test(answerText)) throw new RepositoryAnswerValidationError("insufficient_evidence", undefined, undefined, "answer_prefix");
   } else if (evidenceIds.length === 0) invalid("citation_missing");
   const anchors = new Set(packet.candidates.map(candidate => candidate.evidenceId));
   if (answer.status === "inference" && evidenceIds.filter(id => anchors.has(id as string)).length < 2) invalid("purpose_anchors");

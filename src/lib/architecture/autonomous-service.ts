@@ -53,10 +53,10 @@ export function createAutonomousInvestigationHandler(deps: Dependencies) {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        const emit = (event: InvestigationEvent | { type: "error"; category: string; rule?: string; field?: string }) => { if (!signal.aborted) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)); };
+        const emit = (event: InvestigationEvent | { type: "error"; category: string; rule?: string; field?: string; textRule?: string; answerRule?: string; stage?: string; tool?: string; argumentRule?: string }) => { if (!signal.aborted) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)); };
         void (async () => {
           try { await runAutonomousInvestigation(graph, body.origin as EvidenceOrigin, body.goal as string, deps.createProvider(), signal, emit); }
-          catch (cause) { emit(cause instanceof ModelProviderError ? { type: "error", category: `provider_${cause.code.toLowerCase()}` } : cause instanceof RepositoryAnswerValidationError ? { type: "error", category: "final_validation", rule: cause.category, ...(cause.field ? { field: cause.field } : {}) } : cause instanceof InvestigationValidationError ? { type: "error", category: "final_validation", rule: cause.category } : { type: "error", category: signal.aborted ? "cancelled_or_deadline" : "invalid_investigation" }); }
+          catch (cause) { emit(cause instanceof ModelProviderError ? { type: "error", category: `provider_${cause.code.toLowerCase()}` } : cause instanceof RepositoryAnswerValidationError ? { type: "error", category: "final_validation", rule: cause.category, ...(cause.field ? { field: cause.field } : {}), ...(cause.rule ? { textRule: cause.rule } : {}), ...(cause.answerRule ? { answerRule: cause.answerRule } : {}) } : cause instanceof InvestigationValidationError ? { type: "error", category: ["action_structure", "premature_report", "tool_selection", "tool_arguments"].includes(cause.category) ? "action_validation" : "final_validation", rule: cause.category, ...(cause.category === "tool_arguments" ? { stage: "action_selection", ...(cause.tool ? { tool: cause.tool } : {}), ...(cause.argumentRule ? { argumentRule: cause.argumentRule } : {}) } : {}) } : { type: "error", category: signal.aborted ? "cancelled_or_deadline" : "invalid_investigation" }); }
           finally { active = false; try { controller.close(); } catch { /* The client cancelled the stream. */ } }
         })();
       },

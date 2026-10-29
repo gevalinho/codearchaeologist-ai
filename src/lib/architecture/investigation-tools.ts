@@ -8,18 +8,34 @@ export type InvestigationToolName = typeof investigationToolNames[number];
 export type InvestigationToolArgs = { query: string; componentId: string; depth: number };
 export type InvestigationToolResult = { tool: InvestigationToolName; summary: string; items: Omit<PacketItem, "id">[]; matchCount?: number; coverage?: Graph["sourceCoverage"] | { analyzedFiles: number } };
 const nameSet = new Set<string>(investigationToolNames);
-const validQuery = (value: string) => value.length <= 80 && !/[\u0000-\u001f\u007f<>]/.test(value);
+export type InvestigationToolRule = "missing_fields" | "unexpected_fields" | "unknown_tool" | "query_type" | "query_limit" | "unsafe_query" | "component_id_type" | "component_id_limit" | "depth_type" | "depth_range" | "relationship_target" | "rule_target" | "search_query_required";
+export class InvestigationToolValidationError extends Error {
+  constructor(readonly rule: InvestigationToolRule) { super("Invalid investigation action."); this.name = "InvestigationToolValidationError"; }
+}
+const reject = (rule: InvestigationToolRule): never => { throw new InvestigationToolValidationError(rule); };
 export function normalizeComponentSearch(query: string): string[] {
   return query.trim().replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).map(term => /^(?:authentication|authenticate|authenticated)$/.test(term) ? "auth" : term).slice(0, 8);
 }
 export function parseInvestigationToolCall(value: unknown, graph: Graph): { tool: InvestigationToolName; args: InvestigationToolArgs } {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid investigation action.");
+  if (!value || typeof value !== "object" || Array.isArray(value)) reject("missing_fields");
   const action = value as Record<string, unknown>;
-  if (Object.keys(action).sort().join() !== "componentId,depth,query,tool" || !nameSet.has(action.tool as string) || typeof action.query !== "string" || !validQuery(action.query) || typeof action.componentId !== "string" || action.componentId.length > 500 || !Number.isSafeInteger(action.depth) || (action.depth as number) < 0 || (action.depth as number) > 2) throw new Error("Invalid investigation action.");
-  if (action.tool === "trace_relationships" && (!graph.nodes.some(node => node.id === action.componentId) || (action.depth as number) < 1)) throw new Error("Invalid relationship target.");
-  if (action.tool === "inspect_rule_patterns" && action.componentId && !graph.nodes.some(node => node.id === action.componentId)) throw new Error("Invalid rule target.");
-  if (action.tool === "search_components" && !action.query.trim()) throw new Error("A search term is required.");
-  return { tool: action.tool as InvestigationToolName, args: { query: action.query, componentId: action.componentId, depth: action.depth as number } };
+  const required = ["tool", "query", "componentId", "depth"];
+  if (required.some(key => !(key in action))) reject("missing_fields");
+  if (Object.keys(action).some(key => !required.includes(key))) reject("unexpected_fields");
+  if (!nameSet.has(action.tool as string)) reject("unknown_tool");
+  if (typeof action.query !== "string") reject("query_type");
+  const query = action.query as string;
+  if (query.length > 80) reject("query_limit");
+  if (/[\u0000-\u001f\u007f<>]/.test(query)) reject("unsafe_query");
+  if (typeof action.componentId !== "string") reject("component_id_type");
+  const componentId = action.componentId as string;
+  if (componentId.length > 500) reject("component_id_limit");
+  if (!Number.isSafeInteger(action.depth)) reject("depth_type");
+  if ((action.depth as number) < 0 || (action.depth as number) > 2) reject("depth_range");
+  if (action.tool === "trace_relationships" && ((action.depth as number) < 1 || !graph.nodes.some(node => node.id === componentId))) reject("relationship_target");
+  if (action.tool === "inspect_rule_patterns" && componentId && !graph.nodes.some(node => node.id === componentId)) reject("rule_target");
+  if (action.tool === "search_components" && !query.trim()) reject("search_query_required");
+  return { tool: action.tool as InvestigationToolName, args: { query, componentId, depth: action.depth as number } };
 }
 const item = (kind: PacketItem["kind"], label: string, certainty: PacketItem["certainty"], source: SourceRef): Omit<PacketItem, "id"> | null => safeAiLabel(label) && safeAiSourceRef(source) ? { kind, label, certainty, source: { path: source.path, startLine: source.startLine, endLine: source.startLine } } : null;
 export function executeInvestigationTool(graph: Graph, tool: InvestigationToolName, args: InvestigationToolArgs): InvestigationToolResult {
