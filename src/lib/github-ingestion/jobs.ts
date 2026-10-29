@@ -55,16 +55,17 @@ export class GitHubJobManager {
     job.status = { ...job.status, phase, error };
     this.store.update(job.status.id, job.status, job.leaseId);
   }
-  create(url: string, privateContext?: { user: UserSession; authorized: AuthorizedRepository }): GitHubJobStatus {
+  create(url: string, privateContext?: { user: UserSession; authorized: AuthorizedRepository }, publicUser?: UserSession): GitHubJobStatus {
     this.sweep();
     const repo = parsePublicGitHubUrl(url);
     if (this.store.count() >= 3) throw new Error("Recent analysis capacity is full. Retry after jobs expire.");
-    const quotaLease = this.quota.reserve({ scope: "scan_start", subject: privateContext?.user.id ?? "public-access-key", limit: 2, windowMs: 3_600_000, slot: "global_scan", leaseMs: 95_000 });
+    const quotaLease = this.quota.reserve({ scope: "scan_start", subject: privateContext?.user.id ?? publicUser?.id ?? "legacy-unowned", limit: 2, windowMs: 3_600_000, slot: "global_scan", leaseMs: 95_000 });
     const now = this.deps.now();
     const status: GitHubJobStatus = { id: randomUUID(), phase: "validating-repository-url", repository: `${repo.owner}/${repo.repo}`, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + EXPIRES_MS).toISOString() };
     const job: Job = { status, repo, controller: new AbortController(), leaseId: randomUUID(), quotaLease };
     if (privateContext) { const { user, authorized } = privateContext; job.owner = { id: user.id, nonce: user.nonce, installationId: authorized.installationId, repositoryId: authorized.id }; job.user = user; job.authorized = authorized; }
-    try { this.store.create(status, repo, job.leaseId, job.owner); }
+    else if (publicUser) job.owner = { id: publicUser.id, nonce: publicUser.nonce };
+    try { this.store.create(status, repo, job.leaseId, job.owner, job.authorized?.private ? "private" : "public"); }
     catch (error) { this.quota.release(quotaLease); throw error; }
     this.live.set(status.id, job);
     job.work = this.run(job).catch(() => { if (!job.controller.signal.aborted) this.update(job, "failed", "GitHub analysis failed."); });
@@ -75,10 +76,12 @@ export class GitHubJobManager {
     if (!authorized) throw new Error("Repository is unavailable or you are not authorized.");
     return this.create(`https://github.com/${authorized.owner}/${authorized.name}`, { user, authorized });
   }
+  createPublic(url: string, user: UserSession): GitHubJobStatus { return this.create(url, undefined, user); }
   private owned(job: { owner?: JobOwner } | undefined, user?: UserSession): boolean {
     return !!job && (!job.owner || !!user && job.owner.id === user.id && job.owner.nonce === user.nonce);
   }
-  privateJob(id: string): boolean | undefined { this.sweep(); const job = this.store.get(id); return job ? !!job.owner : undefined; }
+  privateJob(id: string): boolean | undefined { this.sweep(); const job = this.store.get(id); return job ? job.kind === "private" : undefined; }
+  ownedJob(id: string, user: UserSession): boolean { this.sweep(); const job = this.store.get(id); return !!job?.owner && this.owned(job, user); }
   private async run(job: Job) {
     let root: string | undefined;
     let completed: { artifact: Artifact; summary: NonNullable<GitHubJobStatus["summary"]> } | undefined;
@@ -99,7 +102,7 @@ export class GitHubJobManager {
       root = await this.deps.temporary();
       this.update(job, "fetching-repository");
       let token: string | undefined;
-      if (job.owner && job.user && job.authorized) {
+      if (job.owner?.installationId && job.owner.repositoryId && job.user && job.authorized) {
         const fresh = await this.deps.authorize(job.user, job.owner.installationId, job.owner.repositoryId);
         if (!fresh || fresh.owner !== job.authorized.owner || fresh.name !== job.authorized.name) throw new Error("Repository authorization expired or was revoked.");
         token = await this.deps.token(fresh);
@@ -117,7 +120,7 @@ export class GitHubJobManager {
       const eligibleFiles = acquired.eligibleFiles ?? acquired.sourceFiles, omittedFiles = acquired.omittedFiles ?? 0;
       const partial = omittedFiles > 0 || acquired.skippedFiles > 0 || graph.scan.fileCount < acquired.sourceFiles;
       graph.sourceCoverage = { eligibleFiles, selectedFiles: acquired.sourceFiles, omittedFiles, analyzedFiles: graph.scan.fileCount, skippedFiles: acquired.skippedFiles, partial };
-      graph.githubSource = { owner: acquired.canonicalOwner ?? job.repo.owner, name: acquired.canonicalName ?? job.repo.repo, commitSha: acquired.commitSha, visibility: job.owner ? "private" : "public" };
+      graph.githubSource = { owner: acquired.canonicalOwner ?? job.repo.owner, name: acquired.canonicalName ?? job.repo.repo, commitSha: acquired.commitSha, visibility: job.authorized?.private ? "private" : "public" };
       graph.limitations.push(`Complete GitHub commit tree inspected (${acquired.treeEntries} entries). Eligible: ${eligibleFiles}; selected: ${acquired.sourceFiles}; omitted eligible files: ${omittedFiles}; analyzed: ${graph.scan.fileCount}; excluded or unsupported: ${acquired.skippedFiles}. ${partial ? "This is a partial assessment. Missing components and relationships cannot establish that a feature is absent." : "All eligible files were analyzed."}`);
       const manifest: InvestigationManifest = createManifest(graph, `${job.repo.owner}/${job.repo.repo}`);
       const graphJson = `${JSON.stringify(graph, null, 2)}\n`, manifestJson = `${JSON.stringify(manifest, null, 2)}\n`;
@@ -135,7 +138,7 @@ export class GitHubJobManager {
         if (root) await this.deps.cleanup(root).catch(() => { cleaned = false; if (!job.controller.signal.aborted) this.update(job, "failed", "Temporary scanner cleanup failed."); });
         if (cleaned && completed && !job.controller.signal.aborted) {
           let authorized = true;
-          if (job.owner && job.user) {
+          if (job.owner?.installationId && job.owner.repositoryId && job.user) {
             const fresh = await this.deps.authorize(job.user, job.owner.installationId, job.owner.repositoryId).catch(() => null);
             if (!fresh || fresh.owner !== job.authorized?.owner || fresh.name !== job.authorized.name) { this.update(job, "failed", "Repository authorization expired or was revoked."); authorized = false; }
           }
@@ -156,13 +159,13 @@ export class GitHubJobManager {
   async authorizedStatus(id: string, user?: UserSession): Promise<GitHubJobStatus | undefined> {
     this.sweep(); const job = this.store.get(id);
     if (!job || !this.owned(job, user)) return undefined;
-    if (job?.owner && user && !await this.deps.authorize(user, job.owner.installationId, job.owner.repositoryId).catch(() => null)) { this.live.get(id)?.controller.abort(); this.store.invalidate(id, job.status); return undefined; }
+    if (job?.owner?.installationId && job.owner.repositoryId && user && !await this.deps.authorize(user, job.owner.installationId, job.owner.repositoryId).catch(() => null)) { this.live.get(id)?.controller.abort(); this.store.invalidate(id, job.status); return undefined; }
     return job ? { ...job.status } : undefined;
   }
   async artifact(id: string, name: "graph.json" | "manifest.json", user?: UserSession): Promise<string | undefined> {
     this.sweep(); const job = this.store.get(id);
     if (!job || !this.owned(job, user) || job.status.phase !== "ready") return undefined;
-    if (job.owner && user && !await this.deps.authorize(user, job.owner.installationId, job.owner.repositoryId).catch(() => null)) { this.store.invalidate(id, job.status); return undefined; }
+    if (job.owner?.installationId && job.owner.repositoryId && user && !await this.deps.authorize(user, job.owner.installationId, job.owner.repositoryId).catch(() => null)) { this.store.invalidate(id, job.status); return undefined; }
     return this.store.artifact(id, name);
   }
   cancel(id: string, user?: UserSession): GitHubJobStatus | undefined {

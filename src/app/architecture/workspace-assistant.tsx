@@ -12,9 +12,9 @@ import { parseRepositoryAnswer } from "../../lib/architecture/ai-repository-chat
 import { appendAssistantAnswer, assistantContextId, assistantNeedsConsent, emptyAssistantThread, type AssistantScope, type AssistantThread } from "../../lib/architecture/assistant-context";
 import { sourceReference } from "../../lib/architecture/graph";
 
-type Props = { open: boolean; onClose: () => void; repositoryName: string; graph: Graph | null; origin: EvidenceOrigin | null; repositoryPacket: RepositoryEvidencePacket | null; featurePacket: EvidencePacket | null; featureName: string | null; onFocusEvidence: (ref: SourceRef) => void };
+type Props = { open: boolean; onClose: () => void; repositoryName: string; graph: Graph | null; origin: EvidenceOrigin | null; artifactId?: string | null; repositoryPacket: RepositoryEvidencePacket | null; featurePacket: EvidencePacket | null; featureName: string | null; onFocusEvidence: (ref: SourceRef) => void };
 
-export default function WorkspaceAssistant({ open, onClose, repositoryName, graph, origin, repositoryPacket, featurePacket, featureName, onFocusEvidence }: Props) {
+export default function WorkspaceAssistant({ open, onClose, repositoryName, graph, origin, artifactId, repositoryPacket, featurePacket, featureName, onFocusEvidence }: Props) {
   const [mode, setMode] = useState<"chat" | "investigate">("chat");
   const [investigationReview, setInvestigationReview] = useState(false), [investigationConsent, setInvestigationConsent] = useState(false);
   const [investigationEvents, setInvestigationEvents] = useState<Extract<InvestigationEvent, { type: "tool" }>[]>([]), [investigationReport, setInvestigationReport] = useState<InvestigationReport | null>(null);
@@ -42,7 +42,7 @@ export default function WorkspaceAssistant({ open, onClose, repositoryName, grap
     const controller = new AbortController(); requestRef.current = controller;
     setInvestigationLoading(true); setInvestigationError(""); setInvestigationEvents([]); setInvestigationReport(null); setInvestigationReview(false);
     try {
-      const response = await fetch("/api/autonomous-investigation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ goal, graph, origin, consent: true }), cache: "no-store", signal: controller.signal });
+      const response = await fetch("/api/autonomous-investigation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ goal, graph, origin, consent: true, ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
       if (!response.ok) { const body = await response.json(); throw new Error(typeof body.error === "string" ? body.error : "Investigation request failed."); }
       if (!response.body) throw new Error("Investigation stream unavailable.");
       const reader = response.body.getReader(); const decoder = new TextDecoder(); let pending = "", completed = false;
@@ -80,7 +80,7 @@ export default function WorkspaceAssistant({ open, onClose, repositoryName, grap
     const controller = new AbortController(); requestRef.current = controller; setLoading(true); setError("");
     try {
       const current = threads[contextId] ?? emptyAssistantThread();
-      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true, question, history: current.history.slice(-6) }), cache: "no-store", signal: controller.signal });
+      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true, question, history: current.history.slice(-6), ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
       const body = await response.json();
       if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "AI request failed. Retry shortly.");
       if (body.snapshotId !== packet.snapshotId || (scope === "repository" ? body.scope !== "repository" : body.featureId !== (packet as EvidencePacket).featureId)) throw new Error("AI answer belongs to a different investigation.");

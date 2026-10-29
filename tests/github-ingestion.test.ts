@@ -8,7 +8,6 @@ import { acquirePublicRepository } from "../src/lib/github-ingestion/acquire";
 import { GitHubJobManager, type JobDependencies } from "../src/lib/github-ingestion/jobs";
 import { approvedRepositoryMove, fixedHostFetch, pinnedLookup, pinnedPublicAddress, publicIPv4, requireSuccessfulGitHubStatus, type FixedHostFetch } from "../src/lib/github-ingestion/network";
 import { parsePublicGitHubUrl } from "../src/lib/github-ingestion/url";
-import { authorizeGitHubJob } from "../src/lib/github-ingestion/access";
 import { dockerCommand, runIsolatedScanner, scannerAvailable, type DockerCommand } from "../src/lib/github-ingestion/sandbox";
 import { parseGraph } from "../src/lib/architecture/graph";
 import { scanRepository } from "../src/lib/archaeology/scanner";
@@ -228,22 +227,6 @@ describe("bounded source acquisition", () => {
 });
 
 describe("server authorization and sandbox", () => {
-  it("requires enablement, exact origin, and the access key", async () => {
-    const previous = { enabled: process.env.ENABLE_GITHUB_INGESTION, origin: process.env.GITHUB_INGESTION_ORIGIN, key: process.env.GITHUB_INGESTION_ACCESS_KEY };
-    try {
-      process.env.ENABLE_GITHUB_INGESTION = "1";
-      process.env.GITHUB_INGESTION_ORIGIN = "https://investigate.example";
-      process.env.GITHUB_INGESTION_ACCESS_KEY = "a".repeat(32);
-      const request = (origin: string, key: string) => new Request("https://investigate.example/api/github-jobs", { method: "POST", headers: { origin, "x-codearchaeologist-access-key": key } });
-      expect(authorizeGitHubJob(request("https://investigate.example", "a".repeat(32)), true)).toBeNull();
-      expect(authorizeGitHubJob(request("https://evil.example", "a".repeat(32)), true)?.status).toBe(403);
-      expect(authorizeGitHubJob(request("https://investigate.example", "bad"), true)?.status).toBe(401);
-      delete process.env.ENABLE_GITHUB_INGESTION;
-      expect(authorizeGitHubJob(request("https://investigate.example", "a".repeat(32)), true)?.status).toBe(503);
-    } finally {
-      for (const [key, value] of Object.entries({ ENABLE_GITHUB_INGESTION: previous.enabled, GITHUB_INGESTION_ORIGIN: previous.origin, GITHUB_INGESTION_ACCESS_KEY: previous.key })) if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    }
-  });
   it("requires Docker seccomp and a preinstalled image", async () => {
     const imageId = `sha256:${"a".repeat(64)}`;
     const success = (stdout: string) => ({ exitCode: 0, stdout, timedOut: false, failed: false });

@@ -7,7 +7,7 @@ import { parseAiResponseEnvelope, type AiClaim, type AiInterpretation } from "..
 import { parseChatAnswer, type ChatAnswer, type ChatTurn } from "../../lib/architecture/ai-chat";
 import { sourceReference } from "../../lib/architecture/graph";
 
-export default function AiInterpretationPanel({ packet, onFocusEvidence, onOpenPreview, previewAvailable }: { packet: EvidencePacket | null; onFocusEvidence: (ref: SourceRef) => void; onOpenPreview: () => void; previewAvailable: boolean }) {
+export default function AiInterpretationPanel({ packet, artifactId, onFocusEvidence, onOpenPreview, previewAvailable }: { packet: EvidencePacket | null; artifactId?: string | null; onFocusEvidence: (ref: SourceRef) => void; onOpenPreview: () => void; previewAvailable: boolean }) {
   const [consent, setConsent] = useState(false), [question, setQuestion] = useState(""), [history, setHistory] = useState<ChatTurn[]>([]), [chatAnswers, setChatAnswers] = useState<{ question: string; answer: ChatAnswer }[]>([]);
   const [result, setResult] = useState<AiInterpretation | null>(null), [error, setError] = useState(""), [loading, setLoading] = useState(false);
   const pending = useRef<AbortController | null>(null);
@@ -17,7 +17,7 @@ export default function AiInterpretationPanel({ packet, onFocusEvidence, onOpenP
     const controller = new AbortController(); pending.current = controller;
     setError(""); setResult(null); setHistory([]); setChatAnswers([]); setLoading(true);
     try {
-      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true }), cache: "no-store", signal: controller.signal });
+      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true, ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
       const body = await response.json();
       if (!response.ok) {
         const category = typeof body.diagnostic?.category === "string" && /^(?:provider_(?:config|http|timeout|malformed|network|incomplete)|invalid_interpretation)$/.test(body.diagnostic.category) ? body.diagnostic.category.replaceAll("_", " ") : "";
@@ -37,7 +37,7 @@ export default function AiInterpretationPanel({ packet, onFocusEvidence, onOpenP
     const asked = question.trim();
     const controller = new AbortController(); pending.current = controller; setLoading(true); setError("");
     try {
-      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true, question: asked, history: history.slice(-6) }), cache: "no-store", signal: controller.signal });
+      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true, question: asked, history: history.slice(-6), ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
       const body = await response.json();
       if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "AI answer failed. Retry shortly.");
       if (body.featureId !== packet.featureId || body.snapshotId !== packet.snapshotId) throw new Error("AI answer belongs to a different investigation.");

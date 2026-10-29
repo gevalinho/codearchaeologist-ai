@@ -11,8 +11,8 @@ import type { GitHubRepository } from "./url";
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const FILE = /^[a-f0-9-]{36}\.json$/;
 const ACTIVE = new Set(["validating-repository-url", "preparing-isolated-scanner", "fetching-repository", "scanning-supported-source-files", "generating-architecture-graph", "validating-graph"]);
-export type JobOwner = { id: string; nonce: string; installationId: number; repositoryId: number };
-export type StoredJob = { status: GitHubJobStatus; repo: GitHubRepository; owner?: JobOwner; cancelled: boolean; leaseId: string };
+export type JobOwner = { id: string; nonce: string; installationId?: number; repositoryId?: number };
+export type StoredJob = { status: GitHubJobStatus; repo: GitHubRepository; kind: "public" | "private"; owner?: JobOwner; cancelled: boolean; leaseId: string };
 type Row = { id: unknown; repository: unknown; repo_owner: unknown; repo_name: unknown; kind: unknown; owner_id: unknown; owner_nonce: unknown; installation_id: unknown; repository_id: unknown; status_json: unknown; phase: unknown; created_at: unknown; expires_at: unknown; cancelled: unknown; lease_id: unknown };
 type ArtifactRow = { file_id: unknown; sha256: unknown; byte_size: unknown; expires_at: unknown };
 
@@ -64,9 +64,9 @@ export class SqliteJobStore {
   }
   count(): number { return (this.db.prepare("SELECT COUNT(*) AS count FROM github_jobs").get() as { count: number }).count; }
   active(): boolean { return (this.db.prepare("SELECT COUNT(*) AS count FROM github_jobs WHERE phase IN ('validating-repository-url','preparing-isolated-scanner','fetching-repository','scanning-supported-source-files','generating-architecture-graph','validating-graph')").get() as { count: number }).count > 0; }
-  create(status: GitHubJobStatus, repo: GitHubRepository, leaseId: string, owner?: JobOwner): void {
+  create(status: GitHubJobStatus, repo: GitHubRepository, leaseId: string, owner?: JobOwner, kind: "public" | "private" = owner?.installationId ? "private" : "public"): void {
     this.db.prepare("INSERT INTO github_jobs (id,repository,repo_owner,repo_name,kind,owner_id,owner_nonce,installation_id,repository_id,status_json,phase,created_at,expires_at,cancelled,lease_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)")
-      .run(status.id, status.repository, repo.owner, repo.repo, owner ? "private" : "public", owner?.id ?? null, owner?.nonce ?? null, owner?.installationId ?? null, owner?.repositoryId ?? null, JSON.stringify(status), status.phase, Date.parse(status.createdAt), Date.parse(status.expiresAt), leaseId);
+      .run(status.id, status.repository, repo.owner, repo.repo, kind, owner?.id ?? null, owner?.nonce ?? null, owner?.installationId ?? null, owner?.repositoryId ?? null, JSON.stringify(status), status.phase, Date.parse(status.createdAt), Date.parse(status.expiresAt), leaseId);
   }
   get(id: string): StoredJob | undefined {
     if (!UUID.test(id)) return undefined;
@@ -77,9 +77,11 @@ export class SqliteJobStore {
       const status = JSON.parse(row.status_json) as GitHubJobStatus;
       if (status.id !== id || status.phase !== row.phase || status.repository !== row.repository || !["public", "private"].includes(row.kind as string)) return undefined;
       const repo = { owner: row.repo_owner, repo: row.repo_name, canonicalUrl: `https://github.com/${row.repo_owner}/${row.repo_name}` };
-      const owner = row.kind === "private" && typeof row.owner_id === "string" && typeof row.owner_nonce === "string" && Number.isSafeInteger(row.installation_id) && Number.isSafeInteger(row.repository_id) ? { id: row.owner_id, nonce: row.owner_nonce, installationId: row.installation_id as number, repositoryId: row.repository_id as number } : undefined;
-      if (row.kind === "private" && !owner || row.kind === "public" && (row.owner_id !== null || row.owner_nonce !== null)) return undefined;
-      return { status, repo, ...(owner ? { owner } : {}), cancelled: row.cancelled === 1, leaseId: row.lease_id };
+      const hasIdentity = typeof row.owner_id === "string" && typeof row.owner_nonce === "string";
+      const hasInstallation = Number.isSafeInteger(row.installation_id) && Number.isSafeInteger(row.repository_id);
+      const owner = hasIdentity ? { id: row.owner_id as string, nonce: row.owner_nonce as string, ...(hasInstallation ? { installationId: row.installation_id as number, repositoryId: row.repository_id as number } : {}) } : undefined;
+      if (row.kind === "private" && (!owner || !hasInstallation) || row.kind === "public" && ((row.installation_id === null) !== (row.repository_id === null) || row.installation_id !== null && !hasInstallation || (row.owner_id === null) !== (row.owner_nonce === null) || row.owner_id !== null && !hasIdentity) || hasInstallation && !owner) return undefined;
+      return { status, repo, kind: row.kind as "public" | "private", ...(owner ? { owner } : {}), cancelled: row.cancelled === 1, leaseId: row.lease_id };
     } catch { return undefined; }
   }
   update(id: string, status: GitHubJobStatus, leaseId?: string): void {

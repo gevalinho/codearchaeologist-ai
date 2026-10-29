@@ -7,8 +7,11 @@ import { aiChatInstructions, aiChatSchema, parseChatAnswer, parseChatHistory } f
 import { parseRepositoryEvidencePacket } from "./ai-repository-evidence";
 import { parseRepositoryAnswer, RepositoryAnswerValidationError, repositoryChatInstructions, repositoryChatSchema } from "./ai-repository-chat";
 import { QuotaExceeded, type SqliteQuotaStore, type QuotaLease } from "../github-ingestion/quota-store";
+import type { UserSession } from "../github-ingestion/session";
+import type { EvidencePacket } from "./ai-evidence";
+import type { RepositoryEvidencePacket } from "./ai-repository-evidence";
 
-type Dependencies = { enabled: boolean; origin: string | undefined; accessKey?: string; maxOutputTokens?: string; createProvider: () => ModelProvider; privateAuthorized: (request: Request) => boolean; developmentAccess?: boolean; now?: () => number; quota?: () => SqliteQuotaStore; subject?: (request: Request) => string };
+type Dependencies = { enabled: boolean; origin: string | undefined; accessKey?: string; maxOutputTokens?: string; createProvider: () => ModelProvider; privateAuthorized: (request: Request) => boolean; developmentAccess?: boolean; now?: () => number; quota?: () => SqliteQuotaStore; subject?: (request: Request) => string; authenticate?: (request: Request) => Promise<UserSession | null>; authorizeArtifact?: (packet: EvidencePacket | RepositoryEvidencePacket, jobId: unknown, user: UserSession) => Promise<boolean> };
 const json = (body: object, status: number) => Response.json(body, { status, headers: { "Cache-Control": "private, no-store" } });
 const equal = (a: string, b: string) => { const left = Buffer.from(a), right = Buffer.from(b); return left.length === right.length && timingSafeEqual(left, right); };
 export function interpretationOutputTokens(configured?: string): number {
@@ -20,13 +23,19 @@ export function allowDevelopmentAi(nodeEnv: string | undefined, flag: string | u
   if (nodeEnv !== "development" || flag !== "1") return false;
   try { return ["localhost", "127.0.0.1", "[::1]"].includes(new URL(origin ?? "").hostname); } catch { return false; }
 }
+export function allowProductionAi(nodeEnv: string | undefined, enabled: string | undefined, productionFlag: string | undefined, origin: string | undefined, githubOrigin: string | undefined): boolean {
+  if (nodeEnv !== "production" || enabled !== "1" || productionFlag !== "1" || !origin || origin !== githubOrigin) return false;
+  try { const url = new URL(origin); return url.protocol === "https:" && url.origin === origin && !url.username && !url.password; } catch { return false; }
+}
 
 export function createAiInterpretationHandler(deps: Dependencies) {
   let active = false, lastStarted = 0;
   return async function handle(request: Request): Promise<Response> {
-    if (!deps.enabled || !deps.origin || !deps.developmentAccess && (!deps.accessKey || deps.accessKey.length < 32)) return json({ error: "AI interpretation is unavailable on this deployment." }, 503);
+    if (!deps.enabled || !deps.origin || !deps.developmentAccess && !deps.authenticate && (!deps.accessKey || deps.accessKey.length < 32)) return json({ error: "AI interpretation is unavailable on this deployment." }, 503);
     if (request.headers.get("origin") !== deps.origin || request.headers.get("sec-fetch-site") && request.headers.get("sec-fetch-site") !== "same-origin") return json({ error: "Request origin is not allowed." }, 403);
-    if (!deps.developmentAccess && !equal(request.headers.get("x-codearchaeologist-ai-access-key") ?? "", deps.accessKey ?? "")) return json({ error: "AI analysis access key is invalid." }, 401);
+    let user: UserSession | null = null;
+    if (deps.authenticate) { try { user = await deps.authenticate(request); } catch { user = null; } if (!user) return json({ error: "Connect GitHub again before using AI." }, 401); }
+    else if (!deps.developmentAccess && !equal(request.headers.get("x-codearchaeologist-ai-access-key") ?? "", deps.accessKey ?? "")) return json({ error: "AI analysis access key is invalid." }, 401);
     if (request.headers.get("content-type")?.split(";")[0].trim() !== "application/json") return json({ error: "A JSON request is required." }, 415);
     if (Number(request.headers.get("content-length")) > 20_000) return json({ error: "Request exceeds the 20 KB limit." }, 413);
     let raw = "";
@@ -44,11 +53,13 @@ export function createAiInterpretationHandler(deps: Dependencies) {
     finally { reader.releaseLock(); }
     let body: unknown;
     try { body = JSON.parse(raw); } catch { return json({ error: "Invalid JSON request." }, 400); }
-    if (!body || typeof body !== "object" || Array.isArray(body) || ![2, 4].includes(Object.keys(body).length) || (body as { consent?: unknown }).consent !== true) return json({ error: "Explicit AI evidence-sharing consent is required." }, 400);
+    if (!body || typeof body !== "object" || Array.isArray(body) || (body as { consent?: unknown }).consent !== true) return json({ error: "Explicit AI evidence-sharing consent is required." }, 400);
+    const keys = Object.keys(body).sort().join(",");
+    const chat = keys === "consent,history,packet,question" || keys === "artifactId,consent,history,packet,question";
+    if (!chat && keys !== "consent,packet" && keys !== "artifactId,consent,packet") return json({ error: "Invalid bounded AI request." }, 400);
     const repositoryScope = (body as { packet?: { scope?: unknown } }).packet?.scope === "repository";
     let packet;
     try { packet = repositoryScope ? parseRepositoryEvidencePacket((body as { packet?: unknown }).packet) : parseEvidencePacket((body as { packet?: unknown }).packet); } catch { return json({ error: "Invalid bounded evidence packet." }, 400); }
-    const chat = Object.keys(body).length === 4;
     if (repositoryScope && !chat) return json({ error: "Repository analysis requires a bounded question." }, 400);
     let question = "", history: ReturnType<typeof parseChatHistory> = [];
     if (chat) {
@@ -59,11 +70,15 @@ export function createAiInterpretationHandler(deps: Dependencies) {
         history = parseChatHistory(input.history, packet);
       } catch { return json({ error: "Invalid bounded chat request." }, 400); }
     }
-    if (packet.origin === "private-github" && !deps.privateAuthorized(request)) return json({ error: "Connect GitHub before analyzing a private repository." }, 401);
+    const artifactId = (body as { artifactId?: unknown }).artifactId;
+    if (deps.authorizeArtifact && (packet.origin === "private-github" || packet.origin === "public-github")) {
+      if (!user || !await deps.authorizeArtifact(packet, artifactId, user).catch(() => false)) return json({ error: "Evidence artifact is unavailable." }, 404);
+    } else if (packet.origin === "private-github" && !deps.privateAuthorized(request)) return json({ error: "Connect GitHub before analyzing a private repository." }, 401);
+    if (artifactId !== undefined && packet.origin !== "private-github" && packet.origin !== "public-github") return json({ error: "Invalid evidence artifact reference." }, 400);
     const now = deps.now?.() ?? Date.now();
     let lease: QuotaLease | undefined;
     if (deps.quota) {
-      try { lease = deps.quota().reserve({ scope: "ai_start", subject: deps.subject?.(request) ?? "development-local", limit: 6, windowMs: 3_600_000, slot: "global_ai", leaseMs: 35_000 }); }
+      try { lease = deps.quota().reserve({ scope: "ai_start", subject: user?.id ?? deps.subject?.(request) ?? "development-local", limit: 6, windowMs: 3_600_000, slot: "global_ai", leaseMs: 35_000 }); }
       catch (error) { if (error instanceof QuotaExceeded) return new Response(JSON.stringify({ error: "AI quota exceeded. Retry later.", rule: error.rule, retryAfter: error.retryAfterSeconds }), { status: 429, headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store", "Retry-After": String(error.retryAfterSeconds) } }); throw error; }
     } else { if (active || now - lastStarted < 10_000) return json({ error: "AI analysis is busy. Retry shortly." }, 429); active = true; lastStarted = now; }
     try {

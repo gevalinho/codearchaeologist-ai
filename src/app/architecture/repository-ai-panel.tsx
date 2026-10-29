@@ -7,7 +7,7 @@ import { parseRepositoryAnswer, type RepositoryAnswer } from "../../lib/architec
 import type { RepositoryEvidencePacket } from "../../lib/architecture/ai-repository-evidence";
 import { sourceReference } from "../../lib/architecture/graph";
 
-export default function RepositoryAiPanel({ packet, onFocusEvidence, onSelectedFeature }: { packet: RepositoryEvidencePacket | null; onFocusEvidence: (ref: SourceRef) => void; onSelectedFeature: () => void }) {
+export default function RepositoryAiPanel({ packet, artifactId, onFocusEvidence, onSelectedFeature }: { packet: RepositoryEvidencePacket | null; artifactId?: string | null; onFocusEvidence: (ref: SourceRef) => void; onSelectedFeature: () => void }) {
   const [consent, setConsent] = useState(false), [question, setQuestion] = useState(""), [history, setHistory] = useState<ChatTurn[]>([]);
   const [answers, setAnswers] = useState<{ question: string; answer: RepositoryAnswer }[]>([]), [error, setError] = useState(""), [loading, setLoading] = useState(false);
   const pending = useRef<AbortController | null>(null);
@@ -18,7 +18,7 @@ export default function RepositoryAiPanel({ packet, onFocusEvidence, onSelectedF
     if (!asked) return;
     const controller = new AbortController(); pending.current = controller; setLoading(true); setError("");
     try {
-      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true, question: asked, history: history.slice(-6) }), cache: "no-store", signal: controller.signal });
+      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true, question: asked, history: history.slice(-6), ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
       const body = await response.json();
       if (!response.ok) {
         const code = body.diagnostic?.category === "invalid_interpretation" && typeof body.diagnostic?.validationCategory === "string" ? body.diagnostic.validationCategory : null;

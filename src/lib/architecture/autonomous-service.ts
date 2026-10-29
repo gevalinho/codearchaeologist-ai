@@ -5,8 +5,10 @@ import { InvestigationValidationError, runAutonomousInvestigation, type Investig
 import type { EvidenceOrigin } from "./ai-evidence";
 import { RepositoryAnswerValidationError } from "./ai-repository-chat";
 import { QuotaExceeded, type SqliteQuotaStore, type QuotaLease } from "../github-ingestion/quota-store";
+import type { UserSession } from "../github-ingestion/session";
+import type { Graph } from "../archaeology/scanner";
 
-type Dependencies = { enabled: boolean; origin: string | undefined; createProvider: () => ModelProvider; privateAuthorized: (request: Request) => boolean; now?: () => number; quota?: () => SqliteQuotaStore; subject?: (request: Request) => string };
+type Dependencies = { enabled: boolean; origin: string | undefined; createProvider: () => ModelProvider; privateAuthorized: (request: Request) => boolean; now?: () => number; quota?: () => SqliteQuotaStore; subject?: (request: Request) => string; authenticate?: (request: Request) => Promise<UserSession | null>; resolveGraph?: (jobId: unknown, origin: unknown, user: UserSession) => Promise<Graph | null> };
 const MAX_REQUEST_BYTES = MAX_ARTIFACT_BYTES + 2_048;
 const json = (body: object, status: number) => Response.json(body, { status, headers: { "Cache-Control": "private, no-store" } });
 const origins = new Set<EvidenceOrigin>(["browser-local", "public-github", "private-github", "imported-graph"]);
@@ -35,22 +37,30 @@ export function createAutonomousInvestigationHandler(deps: Dependencies) {
   return async (request: Request): Promise<Response> => {
     if (!deps.enabled || !deps.origin) return json({ error: "Autonomous investigation is unavailable on this deployment." }, 503);
     if (request.headers.get("origin") !== deps.origin || request.headers.get("sec-fetch-site") && request.headers.get("sec-fetch-site") !== "same-origin") return json({ error: "Request origin is not allowed." }, 403);
+    let user: UserSession | null = null;
+    if (deps.authenticate) { try { user = await deps.authenticate(request); } catch { user = null; } if (!user) return json({ error: "Connect GitHub again before using AI." }, 401); }
     if (request.headers.get("content-type")?.split(";")[0].trim() !== "application/json") return json({ error: "A JSON request is required." }, 415);
     if (Number(request.headers.get("content-length")) > MAX_REQUEST_BYTES) return json({ error: "Graph artifact exceeds the request limit." }, 413);
     let input: unknown;
     try { input = JSON.parse(await readBounded(request)); }
     catch { return json({ error: "Invalid or oversized bounded investigation request." }, 400); }
-    if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).sort().join() !== "consent,goal,graph,origin" || (input as { consent?: unknown }).consent !== true) return json({ error: "Explicit investigation metadata consent is required." }, 400);
-    const body = input as { goal?: unknown; graph?: unknown; origin?: unknown };
+    if (!input || typeof input !== "object" || Array.isArray(input) || !["consent,goal,graph,origin", "artifactId,consent,goal,graph,origin"].includes(Object.keys(input).sort().join()) || (input as { consent?: unknown }).consent !== true) return json({ error: "Explicit investigation metadata consent is required." }, 400);
+    const body = input as { goal?: unknown; graph?: unknown; origin?: unknown; artifactId?: unknown };
     if (typeof body.goal !== "string" || !body.goal.trim() || body.goal.length > 300 || /[\u0000-\u001f\u007f<>]/.test(body.goal) || !origins.has(body.origin as EvidenceOrigin)) return json({ error: "Invalid investigation goal or origin." }, 400);
-    let graph;
+    let graph: Graph;
     try { graph = parseGraph(JSON.stringify(body.graph)); } catch { return json({ error: "Invalid bounded graph artifact." }, 400); }
-    if (body.origin === "private-github" && !deps.privateAuthorized(request)) return json({ error: "Connect GitHub before investigating a private repository." }, 401);
+    if (deps.resolveGraph && (body.origin === "private-github" || body.origin === "public-github")) {
+      if (!user) return json({ error: "Evidence artifact is unavailable." }, 404);
+      const canonical = await deps.resolveGraph(body.artifactId, body.origin, user).catch(() => null);
+      if (!canonical || JSON.stringify(canonical) !== JSON.stringify(graph)) return json({ error: "Evidence artifact is unavailable." }, 404);
+      graph = canonical;
+    } else if (body.origin === "private-github" && !deps.privateAuthorized(request)) return json({ error: "Connect GitHub before investigating a private repository." }, 401);
+    if (body.artifactId !== undefined && body.origin !== "private-github" && body.origin !== "public-github" || deps.resolveGraph && graph.githubSource?.visibility === "private" && body.origin !== "private-github") return json({ error: "Invalid evidence provenance." }, 400);
     const now = deps.now?.() ?? Date.now();
     let lease: QuotaLease | undefined;
     if (deps.quota) {
       try {
-        const quotas = deps.quota(), subject = deps.subject?.(request) ?? "development-local";
+        const quotas = deps.quota(), subject = user?.id ?? deps.subject?.(request) ?? "development-local";
         quotas.checkProviderBudget();
         quotas.reserve({ scope: "autonomous_daily", subject, limit: 6, windowMs: 86_400_000 });
         lease = quotas.reserve({ scope: "autonomous_start", subject, limit: 2, windowMs: 3_600_000, slot: "global_ai", leaseMs: 50_000 });
