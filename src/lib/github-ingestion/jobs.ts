@@ -1,7 +1,6 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { createManifest, type InvestigationManifest } from "../archaeology/manifest";
 import { parseGraph } from "../architecture/graph";
@@ -10,12 +9,14 @@ import { runIsolatedScanner, scannerAvailable } from "./sandbox";
 import { parsePublicGitHubUrl, type GitHubRepository } from "./url";
 import { authorizeRepository, installationToken, type AuthorizedRepository } from "./app";
 import type { UserSession } from "./session";
+import { SqliteJobStore, type JobOwner } from "./job-store";
+import { privateDirectory } from "./state-db";
 
 export type GitHubJobPhase = "validating-repository-url" | "preparing-isolated-scanner" | "fetching-repository" | "scanning-supported-source-files" | "generating-architecture-graph" | "validating-graph" | "ready" | "failed" | "cancelled";
 export type GitHubJobDiagnostics = AcquisitionDiagnostics & { dockerReadinessMs?: number; sandboxScanMs?: number; graphValidationMs?: number };
 export type GitHubJobStatus = { id: string; phase: GitHubJobPhase; repository: string; createdAt: string; expiresAt: string; error?: string; diagnostics?: GitHubJobDiagnostics; summary?: { scannedFiles: number; scannedBytes: number; eligibleFiles?: number; selectedFiles?: number; omittedFiles?: number; skippedFiles: number; coverage: "complete-supported-source" | "partial-supported-source"; nodes: number; edges: number; warnings: number } };
 type Artifact = { graphJson: string; manifestJson: string };
-type Job = { status: GitHubJobStatus; repo: GitHubRepository; controller: AbortController; artifact?: Artifact; work?: Promise<void>; owner?: { id: string; nonce: string; installationId: number; repositoryId: number }; user?: UserSession; authorized?: AuthorizedRepository };
+type Job = { status: GitHubJobStatus; repo: GitHubRepository; controller: AbortController; work?: Promise<void>; owner?: JobOwner; user?: UserSession; authorized?: AuthorizedRepository; leaseId: string };
 export type JobDependencies = {
   available: () => Promise<string>;
   acquire: typeof acquirePublicRepository;
@@ -28,36 +29,43 @@ export type JobDependencies = {
 };
 const defaults: JobDependencies = {
   available: scannerAvailable, acquire: acquirePublicRepository, scan: runIsolatedScanner,
-  temporary: () => mkdtemp(path.join(tmpdir(), "codearchaeologist-github-")),
+  temporary: () => { const root = process.env.CODEARCH_STAGING_DIR; if (!root) throw new Error("GitHub staging directory is unavailable."); privateDirectory(root); return mkdtemp(path.join(root, "codearchaeologist-github-")); },
   cleanup: root => rm(root, { recursive: true, force: true }), now: Date.now, authorize: authorizeRepository, token: installationToken,
 };
 const EXPIRES_MS = 5 * 60_000;
 
 export class GitHubJobManager {
-  private jobs = new Map<string, Job>();
+  private live = new Map<string, Job>();
   private created: number[] = [];
-  constructor(private readonly deps: JobDependencies = defaults) {}
+  private database?: SqliteJobStore;
+  constructor(private readonly deps: JobDependencies = defaults, store?: SqliteJobStore) {
+    this.database = store;
+  }
+  private get store(): SqliteJobStore { return this.database ??= new SqliteJobStore(process.env.CODEARCH_DB_PATH ?? "", process.env.CODEARCH_ARTIFACT_DIR ?? "", this.deps.now); }
 
   private sweep() {
     const now = this.deps.now();
     this.created = this.created.filter(time => now - time < 60_000);
-    for (const [id, job] of this.jobs) if (new Date(job.status.expiresAt).getTime() <= now) { job.controller.abort(); this.jobs.delete(id); }
+    for (const [id, job] of this.live) if (new Date(job.status.expiresAt).getTime() <= now) { job.controller.abort(); this.live.delete(id); }
+    this.store.sweep();
   }
   private update(job: Job, phase: GitHubJobPhase, error?: string) {
     if (job.controller.signal.aborted && phase !== "cancelled") return;
     job.status = { ...job.status, phase, error };
+    this.store.update(job.status.id, job.status, job.leaseId);
   }
   create(url: string, privateContext?: { user: UserSession; authorized: AuthorizedRepository }): GitHubJobStatus {
     this.sweep();
     if (this.created.length >= 3) throw new Error("GitHub analysis rate limit reached. Retry in a minute.");
-    if ([...this.jobs.values()].some(job => !["ready", "failed", "cancelled"].includes(job.status.phase))) throw new Error("An analysis is already running. Wait or cancel it first.");
-    if (this.jobs.size >= 3) throw new Error("Recent analysis capacity is full. Retry after jobs expire.");
+    if (this.store.active()) throw new Error("An analysis is already running. Wait or cancel it first.");
+    if (this.store.count() >= 3) throw new Error("Recent analysis capacity is full. Retry after jobs expire.");
     const repo = parsePublicGitHubUrl(url);
     const now = this.deps.now();
     const status: GitHubJobStatus = { id: randomUUID(), phase: "validating-repository-url", repository: `${repo.owner}/${repo.repo}`, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + EXPIRES_MS).toISOString() };
-    const job: Job = { status, repo, controller: new AbortController() };
+    const job: Job = { status, repo, controller: new AbortController(), leaseId: randomUUID() };
     if (privateContext) { const { user, authorized } = privateContext; job.owner = { id: user.id, nonce: user.nonce, installationId: authorized.installationId, repositoryId: authorized.id }; job.user = user; job.authorized = authorized; }
-    this.jobs.set(status.id, job); this.created.push(now);
+    this.store.create(status, repo, job.leaseId, job.owner);
+    this.live.set(status.id, job); this.created.push(now);
     job.work = this.run(job).catch(() => { if (!job.controller.signal.aborted) this.update(job, "failed", "GitHub analysis failed."); });
     return { ...status };
   }
@@ -66,16 +74,16 @@ export class GitHubJobManager {
     if (!authorized) throw new Error("Repository is unavailable or you are not authorized.");
     return this.create(`https://github.com/${authorized.owner}/${authorized.name}`, { user, authorized });
   }
-  private owned(job: Job | undefined, user?: UserSession): boolean {
+  private owned(job: { owner?: JobOwner } | undefined, user?: UserSession): boolean {
     return !!job && (!job.owner || !!user && job.owner.id === user.id && job.owner.nonce === user.nonce);
   }
-  privateJob(id: string): boolean | undefined { this.sweep(); const job = this.jobs.get(id); return job ? !!job.owner : undefined; }
+  privateJob(id: string): boolean | undefined { this.sweep(); const job = this.store.get(id); return job ? !!job.owner : undefined; }
   private async run(job: Job) {
     let root: string | undefined;
     let completed: { artifact: Artifact; summary: NonNullable<GitHubJobStatus["summary"]> } | undefined;
     const deadline = setTimeout(() => { this.update(job, "failed", "GitHub analysis exceeded its 90-second deadline."); job.controller.abort(); }, 90_000);
     deadline.unref();
-    const recordTiming = (values: Partial<GitHubJobDiagnostics>) => { job.status = { ...job.status, diagnostics: { selectedBlobs: 0, completedBlobs: 0, failedBlobs: 0, ...job.status.diagnostics, ...values } }; };
+    const recordTiming = (values: Partial<GitHubJobDiagnostics>) => { job.status = { ...job.status, diagnostics: { selectedBlobs: 0, completedBlobs: 0, failedBlobs: 0, ...job.status.diagnostics, ...values } }; this.store.update(job.status.id, job.status, job.leaseId); };
     try {
       this.update(job, "preparing-isolated-scanner");
       const readinessStarted = performance.now();
@@ -123,30 +131,32 @@ export class GitHubJobManager {
           const fresh = await this.deps.authorize(job.user, job.owner.installationId, job.owner.repositoryId).catch(() => null);
           if (!fresh || fresh.owner !== job.authorized?.owner || fresh.name !== job.authorized.name) { this.update(job, "failed", "Repository authorization expired or was revoked."); return; }
         }
-        job.artifact = completed.artifact;
-        job.status = { ...job.status, phase: "ready", summary: completed.summary };
+        const ready = { ...job.status, phase: "ready" as const, summary: completed.summary };
+        try { this.store.publish(job.status.id, job.leaseId, completed.artifact, ready); job.status = ready; }
+        catch { this.update(job, "failed", "Could not publish validated scan artifacts."); }
       }
+      this.live.delete(job.status.id);
     }
   }
-  get(id: string, user?: UserSession): GitHubJobStatus | undefined { this.sweep(); const job = this.jobs.get(id); return this.owned(job, user) ? { ...job!.status } : undefined; }
+  get(id: string, user?: UserSession): GitHubJobStatus | undefined { this.sweep(); const job = this.store.get(id); return this.owned(job, user) ? job?.status : undefined; }
   async authorizedStatus(id: string, user?: UserSession): Promise<GitHubJobStatus | undefined> {
-    this.sweep(); const job = this.jobs.get(id);
+    this.sweep(); const job = this.store.get(id);
     if (!job || !this.owned(job, user)) return undefined;
-    if (job?.owner && user && !await this.deps.authorize(user, job.owner.installationId, job.owner.repositoryId).catch(() => null)) { job.controller.abort(); job.artifact = undefined; this.update(job, "cancelled"); return undefined; }
+    if (job?.owner && user && !await this.deps.authorize(user, job.owner.installationId, job.owner.repositoryId).catch(() => null)) { this.live.get(id)?.controller.abort(); this.store.invalidate(id, job.status); return undefined; }
     return job ? { ...job.status } : undefined;
   }
   async artifact(id: string, name: "graph.json" | "manifest.json", user?: UserSession): Promise<string | undefined> {
-    this.sweep(); const job = this.jobs.get(id);
+    this.sweep(); const job = this.store.get(id);
     if (!job || !this.owned(job, user) || job.status.phase !== "ready") return undefined;
-    if (job.owner && user && !await this.deps.authorize(user, job.owner.installationId, job.owner.repositoryId).catch(() => null)) { job.artifact = undefined; return undefined; }
-    return job.artifact?.[name === "graph.json" ? "graphJson" : "manifestJson"];
+    if (job.owner && user && !await this.deps.authorize(user, job.owner.installationId, job.owner.repositoryId).catch(() => null)) { this.store.invalidate(id, job.status); return undefined; }
+    return this.store.artifact(id, name);
   }
   cancel(id: string, user?: UserSession): GitHubJobStatus | undefined {
-    this.sweep(); const job = this.jobs.get(id); if (!job || !this.owned(job, user)) return undefined;
-    if (job.status.phase !== "ready" && job.status.phase !== "failed") { job.controller.abort(); this.update(job, "cancelled"); job.artifact = undefined; }
-    return { ...job.status };
+    this.sweep(); const job = this.store.get(id); if (!job || !this.owned(job, user)) return undefined;
+    if (job.status.phase !== "ready" && job.status.phase !== "failed") { this.live.get(id)?.controller.abort(); const status = { ...job.status, phase: "cancelled" as const }; this.store.cancel(id, status); return status; }
+    return job.status;
   }
-  async wait(id: string): Promise<void> { await this.jobs.get(id)?.work; }
+  async wait(id: string): Promise<void> { await this.live.get(id)?.work; }
 }
 
 const singletonKey = Symbol.for("codearchaeologist.github-ingestion.jobs");

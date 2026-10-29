@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { acquirePublicRepository } from "../src/lib/github-ingestion/acquire";
@@ -17,7 +18,9 @@ import demoGraph from "./fixtures/architecture/demo-graph.json";
 vi.mock("server-only", () => ({}));
 
 const temporaryRoots: string[] = [];
-afterEach(async () => { await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
+const originalDb = process.env.CODEARCH_DB_PATH, originalArtifacts = process.env.CODEARCH_ARTIFACT_DIR;
+beforeEach(() => { const root = mkdtempSync(path.join(tmpdir(), "github-job-state-test-")); temporaryRoots.push(root); mkdirSync(path.join(root, "artifacts"), { mode: 0o700 }); process.env.CODEARCH_DB_PATH = path.join(root, "state.sqlite"); process.env.CODEARCH_ARTIFACT_DIR = path.join(root, "artifacts"); });
+afterEach(async () => { if (originalDb === undefined) delete process.env.CODEARCH_DB_PATH; else process.env.CODEARCH_DB_PATH = originalDb; if (originalArtifacts === undefined) delete process.env.CODEARCH_ARTIFACT_DIR; else process.env.CODEARCH_ARTIFACT_DIR = originalArtifacts; await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true }))); });
 const temp = async () => { const root = await mkdtemp(path.join(tmpdir(), "github-ingestion-test-")); temporaryRoots.push(root); return root; };
 const encoded = (value: unknown) => Buffer.from(JSON.stringify(value));
 const blobSha = (bytes: Buffer) => createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");

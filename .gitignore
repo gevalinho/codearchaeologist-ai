@@ -151,3 +151,6 @@ vite.config.ts.timestamp-*
 
 # Local repository intelligence artifacts
 .local-archaeology/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
