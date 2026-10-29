@@ -10,7 +10,13 @@ const trustedFiles = ["scripts/register-types.mjs", "scripts/run-github-scan.ts"
 type CommandResult = { exitCode: number | null; stdout: string; timedOut: boolean; failed: boolean };
 export type DockerCommand = (args: string[], timeoutMs: number, maxOutput: number, signal?: AbortSignal) => Promise<CommandResult>;
 
+/** B5 boundary: production web requests cannot execute Docker until a separate worker handoff exists. */
+export function assertScannerProcessBoundary(): void {
+  if (process.env.NODE_ENV === "production") throw new Error("Isolated scanner unavailable: production worker handoff is not configured.");
+}
+
 export const dockerCommand: DockerCommand = (args, timeoutMs, maxOutput, signal) => new Promise(resolve => {
+  assertScannerProcessBoundary();
   if (signal?.aborted) { resolve({ exitCode: null, stdout: "", timedOut: false, failed: true }); return; }
   const child = spawn("docker", args, { shell: false, stdio: ["ignore", "pipe", "pipe"], env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: "/tmp", NODE_ENV: "production" } });
   let stdout = "", failed = false, timedOut = false, settled = false;
@@ -27,6 +33,7 @@ export const dockerCommand: DockerCommand = (args, timeoutMs, maxOutput, signal)
 });
 
 export async function scannerAvailable(execute: DockerCommand = dockerCommand): Promise<string> {
+  assertScannerProcessBoundary();
   const info = await execute(["info", "--format", "{{json .SecurityOptions}}"], 2_500, 4_096);
   if (info.exitCode !== 0 || info.timedOut || info.failed) throw new Error("Isolated scanner unavailable: Docker daemon cannot be reached.");
   let options: unknown;
@@ -68,6 +75,7 @@ async function containerAbsent(name: string, execute: DockerCommand): Promise<bo
 }
 
 export async function runIsolatedScanner(root: string, imageId: string, signal: AbortSignal, execute: DockerCommand = dockerCommand): Promise<string> {
+  assertScannerProcessBoundary();
   if (!/^sha256:[a-f0-9]{64}$/.test(imageId)) throw new Error("Invalid scanner image identity.");
   const runner = await stageRunner(root);
   const name = `codearchaeologist-scan-${randomUUID()}`;

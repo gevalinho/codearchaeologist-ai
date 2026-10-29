@@ -9,6 +9,7 @@ export async function POST(request: Request) {
   if (!sameOrigin(request)) return jobJson({ error: "Request origin is not allowed." }, 403);
   const user = await verifiedGitHubSession(request);
   if (!user) return jobJson({ error: "Connect GitHub again to analyze repositories." }, 401);
+  if (process.env.NODE_ENV === "production") return jobJson({ error: "Repository scanning is unavailable until the isolated scanner worker is deployed." }, 503);
   if (request.headers.get("x-codearchaeologist-ingestion") === "github-app") {
     try {
       const body = await readSmallJson(request) as { installationId?: unknown; repositoryId?: unknown };

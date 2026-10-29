@@ -22,7 +22,7 @@ The server process needs permission to use the Docker daemon. On the current dev
 
 ## EC2 deployment notes
 
-Deploy behind an HTTPS reverse proxy and set `GITHUB_APP_ORIGIN` to that exact external origin. Configure private persistent `CODEARCH_DB_PATH`, `CODEARCH_ARTIFACT_DIR`, and `CODEARCH_STAGING_DIR`. Keep the application server and Docker daemon under a dedicated, least-privilege operational setup; inspect the daemon/socket access model before enabling the feature. Pre-pull and maintain the trusted Node image, verify seccomp and outbound access to the fixed GitHub hosts, and ensure temporary disk space for bounded jobs. A separate Docker-capable worker is still needed before removing Docker daemon access from the web process. Never mount the Docker socket into scanner containers.
+Deploy behind an HTTPS reverse proxy and set `GITHUB_APP_ORIGIN` to that exact external origin. Configure private persistent `CODEARCH_DB_PATH`, `CODEARCH_ARTIFACT_DIR`, and `CODEARCH_STAGING_DIR`. Production scan creation is currently disabled until the separate scanner worker and secure handoff are implemented; see [worker boundary](isolated-scanner-worker.md). The production web process must have no Docker daemon access. Never mount the Docker socket into scanner containers.
 
 ## Manual browser acceptance
 

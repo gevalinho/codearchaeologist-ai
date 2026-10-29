@@ -5,6 +5,7 @@ import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { VerificationCase } from "../../types/investigation";
 import { PRICING_SOURCE_SHA256 } from "./pricing-templates";
+import { assertScannerProcessBoundary } from "../github-ingestion/sandbox";
 
 const IMAGE = "node:22-bookworm-slim";
 const MAX_OUTPUT = 16_000;
@@ -21,6 +22,7 @@ export interface SandboxRunner { run(cases: readonly VerificationCase[]): Promis
 
 /** Executes only the Docker CLI; fixture code runs solely inside the container. */
 export const executeDockerCommand: CommandExecutor = (args, input, timeoutMs) => new Promise((resolve) => {
+  assertScannerProcessBoundary();
   let settled = false;
   let stdout = "";
   let stderr = "";

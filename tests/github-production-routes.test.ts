@@ -49,4 +49,12 @@ describe("production GitHub job routes", () => {
     expect(jobs.artifact).toHaveBeenCalledWith("public-job", "graph.json", user);
     expect(await response.text()).not.toContain(user.token);
   });
+
+  it("does not create a production scan before the isolated worker handoff exists", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const response = await start(request("/api/github-jobs", "POST", { url: "https://github.com/example/repo" }));
+    expect(response.status).toBe(503);
+    expect(jobs.createPublic).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+  });
 });

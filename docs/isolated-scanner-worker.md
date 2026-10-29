@@ -1,0 +1,23 @@
+# Isolated scanner worker: fail-closed B5 boundary
+
+Production repository scan creation returns HTTP 503. This is intentional until a separate worker and secure handoff are implemented and tested. The production Docker command paths also reject execution before spawning Docker. Development scans remain available under their existing controls. Do not set `ENABLE_GITHUB_INGESTION=1` on the production web service or grant its Unix identity Docker access.
+
+## Current path and blocking conflict
+
+`/api/github-jobs` creates a job through `GitHubJobManager`. Its in-process `run` method calls `scannerAvailable`, performs GitHub metadata/tree/blob acquisition (including installation-token handling), then calls `runIsolatedScanner`. Both scanner functions invoke `docker` in the same Next.js process. The separate legacy pricing verification command in `src/lib/verification/docker-sandbox.ts` is another Docker spawn path; `/api/investigate` is development-only. The scanner still uses a fixed local image, explicit seccomp verification, no container network, non-root execution, read-only mounts, no new privileges, and resource limits.
+
+The B1–B3 database and artifact storage checks require the current process UID to own private 0700 directories and 0600 files. Staging directories created by the web process have the same private ownership. A worker under a different UID cannot read the staged source or database. Changing these paths to broadly shared modes would expose OAuth ciphertext, session records, repository metadata, and private graph artifacts, and would invalidate existing ownership checks. The database also holds session and provider quota state, so direct worker access to the whole database needs a narrowly specified trust model.
+
+## Required worker contract for the next implementation
+
+1. The web service authenticates and authorizes the user, reserves the global scan quota, creates the durable job, and acquires authorized source into a validated staging directory. Only the web service handles GitHub OAuth and installation tokens.
+2. A dedicated worker receives only a random job ID through a narrow local handoff. It atomically claims the exact queued job with a worker lease and verifies the expected phase, deadline, staging identity, and cancellation state before scanning. No caller supplies a path, image, command, mount, or Docker arguments.
+3. The worker reads staged source through a specifically designed shared staging boundary, runs the existing fixed scanner sandbox, and writes a bounded result to a private handoff. The web side parses and validates the graph, adds provenance and coverage metadata, rechecks installation authorization, and atomically publishes the existing graph and manifest artifacts.
+4. A cancelled, expired, or lease-lost worker must stop Docker and discard results. Restart recovery marks interrupted work failed; it never automatically reruns a scanner. Sweeps remove only validated, unclaimed, expired staging paths without following symlinks.
+5. The worker environment contains no GitHub App secrets, session encryption key, Baseten key, or AI-provider credentials. Its Unix identity alone may access the Docker socket. The web identity must not belong to the Docker group, receive Docker-capable sudo rights, or inherit `DOCKER_HOST` pointing to a privileged endpoint.
+
+## Deployment prerequisites
+
+On the single Ubuntu 24.04 EC2 host, create separate web and worker service identities. Design a dedicated staging handoff with explicit ownership, group membership or ACLs, non-symlink directory validation, and atomic creation. Keep the session database and artifact directory private to the web identity; use a separate worker-readable queue or a narrowly scoped local IPC if the worker must not open the full state database. Add atomic claim/release semantics and a durable web-side completion path before writing systemd units or changing permissions. Use separate environment files; the worker file must contain only staging, queue, and fixed scanner settings. Restrict the worker service's network access, grant Docker socket access only to the worker identity, and verify the actual Unix groups and socket ACLs after installation. Use persistent paths outside releases for the database, artifacts, and staging.
+
+Migration and rollback must be fail closed: stop new scan creation, drain or cancel old jobs, back up the database and artifacts, apply additive schema changes, start the worker, verify ownership and sandbox probes, then enable scan creation. Rollback disables scan creation first and leaves existing artifacts readable under ownership checks. No deployment changes or AWS access were made in this iteration.
