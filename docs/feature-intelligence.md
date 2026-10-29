@@ -6,7 +6,7 @@ The browser builds feature candidates from an imported graph. `discoverFeatures`
 
 The Student Promotion investigation searches the imported graph for promotion components and known related names. Reported active-session, destination-class, date, membership, and score-limit details are operator notes awaiting source review. Guard edges show that the scanner found a condition pattern; they do not reveal the condition or prove runtime behavior. Score-entry components remain naming associations unless recorded graph edges connect them to promotion.
 
-Use `/architecture`, import `.local-archaeology/graph.json`, then choose a candidate in Feature Intelligence. Selecting a component or recorded relationship focuses the graph and exposes its source reference in the evidence inspector. No graph or source data is uploaded or stored by this feature.
+Use `/`, import `.local-archaeology/graph.json`, then choose a candidate in Feature Intelligence. Selecting a component or recorded relationship focuses the graph and exposes its source reference in the evidence inspector. No graph or source data is uploaded or stored by this feature.
 
 Phase 5.3B ranks components into Core, Supporting, and Related tiers. A feature-named entry point with an observed edge can be Core; shared infrastructure stays Supporting even when connected. Name-only matches remain Related. Each component shows the ranking reason and source reference. These tiers guide review and do not establish runtime execution.
 

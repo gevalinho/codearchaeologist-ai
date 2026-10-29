@@ -1,0 +1,52 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { parseGraph, neighborhood, indexGraph, sourceReference } from "../src/lib/architecture/graph";
+import { discoverFeatures } from "../src/lib/architecture/features";
+import { buildModernizationBlueprint } from "../src/lib/architecture/blueprint";
+import { createModernizationPreview } from "../src/lib/architecture/preview";
+import { initialPreviewDrawerState, reducePreviewDrawer } from "../src/lib/architecture/preview-drawer";
+import { initialPromotionDemoState, reducePromotionDemo } from "../src/lib/architecture/promotion-demo";
+
+const artifact = readFileSync(new URL("./fixtures/architecture/demo-graph.json", import.meta.url), "utf8");
+
+describe("synthetic architecture journey models", () => {
+  it("imports, investigates, maps evidence, simulates, and preserves local state on drawer reopen", () => {
+    const graph = parseGraph(artifact);
+    const feature = discoverFeatures(graph).find(item => item.id === "feature:promotion")!;
+    expect(feature).toBeDefined();
+    expect(feature.relationships.map(edge => edge.id)).toEqual(["edge:demo-call", "edge:demo-guard", "edge:demo-table"]);
+    const selected = indexGraph(graph).nodes.get("method:demo-promotion")!;
+    const visible = neighborhood(graph, [selected.id], 1);
+    expect(visible.nodes.some(node => node.id === "branch:demo-review")).toBe(true);
+    expect(visible.edges.every(edge => graph.edges.some(recorded => recorded.id === edge.id))).toBe(true);
+    const blueprint = buildModernizationBlueprint(feature, graph.snapshotId);
+    const repeated = buildModernizationBlueprint(feature, graph.snapshotId);
+    expect(blueprint.mappings.map(mapping => mapping.id)).toEqual(repeated.mappings.map(mapping => mapping.id));
+    expect(new Set(blueprint.mappings.map(mapping => mapping.id)).size).toBe(blueprint.mappings.length);
+    expect(blueprint.mappings).toHaveLength(5);
+    const sharedSourceMapping = blueprint.mappings.find(mapping => mapping.legacyNodeId === "endpoint:demo-promotion")!;
+    expect(sharedSourceMapping.evidence.sourceEvidence.map(entry => sourceReference(entry.source))).toEqual(["assets/js/demo.js:8", "assets/js/demo.js:8"]);
+    expect(new Set(sharedSourceMapping.evidence.sourceEvidence.map(entry => entry.id)).size).toBe(2);
+    expect(sharedSourceMapping.evidence.sourceEvidence.map(entry => entry.origin.kind)).toEqual(["node", "edge"]);
+    expect(blueprint.mappings.flatMap(mapping => mapping.evidence.sourceRefs).filter(ref => sourceReference(ref) === "application/controllers/DemoPromotion.php:10")).toHaveLength(3);
+    const preview = createModernizationPreview(feature, blueprint)!;
+    expect(preview.components.find(item => item.name === "Promotion review")?.legacySourceRefs.length).toBeGreaterThan(0);
+    const key = `${preview.id}:${preview.sourceSnapshotId}`;
+    let drawer = reducePreviewDrawer(initialPreviewDrawerState(), { type: "open", previewKey: key });
+    let demo = initialPromotionDemoState();
+    demo = reducePromotionDemo(demo, { type: "session", id: "demo-session-1" });
+    demo = reducePromotionDemo(demo, { type: "source", id: "demo-class-1" });
+    demo = reducePromotionDemo(demo, { type: "destination", id: "demo-class-2" });
+    demo = reducePromotionDemo(demo, { type: "toggle", id: "demo-student-01" });
+    demo = reducePromotionDemo(demo, { type: "review" });
+    expect(demo.stage).toBe("review");
+    demo = reducePromotionDemo(demo, { type: "confirm" });
+    expect(demo.stage).toBe("confirmed");
+    drawer = reducePreviewDrawer(drawer, { type: "close" });
+    drawer = reducePreviewDrawer(drawer, { type: "open", previewKey: key });
+    expect(drawer.open).toBe(true);
+    expect(demo.selectedStudentIds).toEqual(["demo-student-01"]);
+    expect(reducePromotionDemo(demo, { type: "reset" })).toEqual(initialPromotionDemoState());
+    expect(indexGraph(graph).nodes.get(selected.id)).toEqual(selected);
+  });
+});

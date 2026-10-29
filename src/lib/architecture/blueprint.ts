@@ -4,7 +4,8 @@ import { rankFeatureComponents } from "./relevance";
 
 export type TargetArchitecture = { id: string; title: string; frontend: string; backend: string; status: "proposed" };
 export type ProposedComponent = { id: string; title: string; responsibility: string; layer: "frontend" | "api" | "application" | "domain" | "data"; provenance: "modernization-recommendation" };
-export type LegacyModernMapping = { legacyNodeId: string; proposedComponentId: string; rationale: string; evidence: { sourceRefs: SourceRef[]; graphEdgeIds: string[]; certainty: "observed" | "inferred" | "name-match" }; provenance: "design-recommendation" };
+export type MappingSourceEvidence = { id: string; source: SourceRef; origin: { kind: "node" | "edge"; id: string } };
+export type LegacyModernMapping = { id: string; legacyNodeId: string; proposedComponentId: string; rationale: string; evidence: { sourceRefs: SourceRef[]; sourceEvidence: MappingSourceEvidence[]; graphEdgeIds: string[]; certainty: "observed" | "inferred" | "name-match" }; provenance: "design-recommendation" };
 export type ModernizationBlueprint = { id: string; sourceFeatureId: string; sourceSnapshotId: string; target: TargetArchitecture; proposedComponents: ProposedComponent[]; proposedFlow: string[]; mappings: LegacyModernMapping[]; supportingSourceEvidence: SourceRef[]; assumptions: string[]; unresolvedDecisions: string[]; verificationRequirements: string[]; recommendationProvenance: "deterministic-template-v1" };
 
 export const NEXT_LAYERED: TargetArchitecture = { id: "nextjs-layered-v1", title: "React / Next.js with a layered backend", frontend: "React / Next.js", backend: "Layered API, application, domain, and data access", status: "proposed" };
@@ -31,7 +32,12 @@ export function buildModernizationBlueprint(feature: FeatureInvestigation, snaps
     else if (node.kind === "branch") destination = "validation";
     if (!destination) return [];
     const edges = feature.relationships.filter(edge => item.evidenceEdgeIds.includes(edge.id));
-    return [{ legacyNodeId: node.id, proposedComponentId: `${prefix}:${destination}`, rationale: `Candidate placement based on ${node.kind} metadata; responsibility and behavior require source review.`, evidence: { sourceRefs: [node.source, ...edges.map(edge => edge.source)], graphEdgeIds: edges.map(edge => edge.id), certainty: edges.some(edge => edge.certainty === "observed") ? "observed" as const : edges.some(edge => edge.certainty === "inferred") ? "inferred" as const : "name-match" as const }, provenance: "design-recommendation" as const }];
+    const id = `${prefix}:mapping:${encodeURIComponent(node.id)}:${destination}`;
+    const sourceEvidence: MappingSourceEvidence[] = [
+      { id: `${id}:source:node:${encodeURIComponent(node.id)}`, source: node.source, origin: { kind: "node", id: node.id } },
+      ...edges.map(edge => ({ id: `${id}:source:edge:${encodeURIComponent(edge.id)}`, source: edge.source, origin: { kind: "edge" as const, id: edge.id } })),
+    ];
+    return [{ id, legacyNodeId: node.id, proposedComponentId: `${prefix}:${destination}`, rationale: `Candidate placement based on ${node.kind} metadata; responsibility and behavior require source review.`, evidence: { sourceRefs: sourceEvidence.map(entry => entry.source), sourceEvidence, graphEdgeIds: edges.map(edge => edge.id), certainty: edges.some(edge => edge.certainty === "observed") ? "observed" as const : edges.some(edge => edge.certainty === "inferred") ? "inferred" as const : "name-match" as const }, provenance: "design-recommendation" as const }];
   });
   return {
     id: prefix, sourceFeatureId: feature.id, sourceSnapshotId: snapshotId, target, proposedComponents,

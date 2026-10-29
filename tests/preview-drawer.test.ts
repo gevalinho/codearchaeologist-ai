@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { focusTrapTarget, initialPreviewDrawerState, reducePreviewDrawer } from "../src/lib/architecture/preview-drawer";
+import { focusTrapTarget, initialPreviewDrawerState, previewDrawerOpen, reducePreviewDrawer } from "../src/lib/architecture/preview-drawer";
 import { initialPromotionDemoState, reducePromotionDemo } from "../src/lib/architecture/promotion-demo";
 
 const promotionKey = "preview:promotion:nextjs-layered-v1:snapshot-1";
@@ -22,6 +22,19 @@ describe("preview drawer state", () => {
     expect(reducePreviewDrawer(open, { type: "feature-change", previewKey: null })).toEqual({ open: false, expanded: false, previewKey: null });
     expect(reducePreviewDrawer(open, { type: "feature-change", previewKey: "preview:other:target:snapshot-1" })).toMatchObject({ open: false, expanded: false });
     expect(reducePreviewDrawer(open, { type: "feature-change", previewKey: promotionKey })).toEqual(open);
+  });
+  it("activates the matching generic preview and rejects stale feature keys", () => {
+    const genericKey = "reconstruction:orders:snapshot-1";
+    let drawer = reducePreviewDrawer(initialPreviewDrawerState(), { type: "open", previewKey: genericKey });
+    expect(previewDrawerOpen(drawer, genericKey)).toBe(true);
+    expect(previewDrawerOpen(drawer, promotionKey)).toBe(false);
+    drawer = reducePreviewDrawer(drawer, { type: "close" });
+    expect(previewDrawerOpen(drawer, genericKey)).toBe(false);
+    drawer = reducePreviewDrawer(drawer, { type: "open", previewKey: genericKey });
+    drawer = reducePreviewDrawer(drawer, { type: "feature-change", previewKey: null });
+    expect(previewDrawerOpen(drawer, genericKey)).toBe(false);
+    drawer = reducePreviewDrawer(drawer, { type: "open", previewKey: promotionKey });
+    expect(previewDrawerOpen(drawer, promotionKey)).toBe(true);
   });
 });
 

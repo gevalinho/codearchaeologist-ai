@@ -16,7 +16,7 @@ function validateBlueprint(feature: FeatureInvestigation, blueprint: Modernizati
   const edgeIds = new Set(feature.relationships.map(edge => edge.id));
   if (componentIds.size !== blueprint.proposedComponents.length || blueprint.proposedFlow.some(id => !componentIds.has(id))) throw new Error("Invalid blueprint component reference");
   for (const mapping of blueprint.mappings) {
-    if (!componentIds.has(mapping.proposedComponentId) || !nodeIds.has(mapping.legacyNodeId) || mapping.evidence.graphEdgeIds.some(id => !edgeIds.has(id)) || mapping.evidence.sourceRefs.some(ref => !safePath(ref.path))) throw new Error("Invalid blueprint mapping reference");
+    if (!mapping.id || !componentIds.has(mapping.proposedComponentId) || !nodeIds.has(mapping.legacyNodeId) || mapping.evidence.graphEdgeIds.some(id => !edgeIds.has(id)) || mapping.evidence.sourceRefs.some(ref => !safePath(ref.path)) || mapping.evidence.sourceEvidence.some(entry => !entry.id || !safePath(entry.source.path) || (entry.origin.kind === "node" ? !nodeIds.has(entry.origin.id) : !edgeIds.has(entry.origin.id)))) throw new Error("Invalid blueprint mapping reference");
   }
 }
 

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.0.0",
+  "snapshotId": "synthetic-architecture-demo",
+  "scan": { "fileCount": 2, "totalBytes": 220 },
+  "warnings": [],
+  "limitations": ["Synthetic fixture for product testing; no legacy behavior is verified."],
+  "nodes": [
+    { "id": "controller:demo-promotion", "kind": "controller", "name": "assets/js/demo.js#promotionCtr", "domain": "school-management", "source": { "path": "assets/js/demo.js", "startLine": 2, "endLine": 12 }, "certainty": "observed", "method": "synthetic-fixture" },
+    { "id": "endpoint:demo-promotion", "kind": "endpoint", "name": "index.php/demo/putpromotion", "domain": "school-management", "source": { "path": "assets/js/demo.js", "startLine": 8, "endLine": 8 }, "certainty": "observed", "method": "synthetic-fixture" },
+    { "id": "method:demo-promotion", "kind": "method", "name": "application/controllers/DemoPromotion.php#putPromotion", "domain": "school-management", "source": { "path": "application/controllers/DemoPromotion.php", "startLine": 3, "endLine": 20 }, "certainty": "observed", "method": "synthetic-fixture" },
+    { "id": "table:demo-enrollment", "kind": "table", "name": "demo_enrollment", "domain": "school-management", "source": { "path": "application/controllers/DemoPromotion.php", "startLine": 16, "endLine": 16 }, "certainty": "inferred", "method": "synthetic-fixture" },
+    { "id": "branch:demo-review", "kind": "branch", "name": "application/controllers/DemoPromotion.php:10", "domain": "unknown", "source": { "path": "application/controllers/DemoPromotion.php", "startLine": 10, "endLine": 10 }, "certainty": "observed", "method": "synthetic-fixture" }
+  ],
+  "edges": [
+    { "id": "edge:demo-call", "from": "controller:demo-promotion", "to": "endpoint:demo-promotion", "kind": "calls-endpoint", "source": { "path": "assets/js/demo.js", "startLine": 8, "endLine": 8 }, "certainty": "observed", "method": "synthetic-fixture" },
+    { "id": "edge:demo-table", "from": "method:demo-promotion", "to": "table:demo-enrollment", "kind": "references-table", "source": { "path": "application/controllers/DemoPromotion.php", "startLine": 16, "endLine": 16 }, "certainty": "inferred", "method": "synthetic-fixture" },
+    { "id": "edge:demo-guard", "from": "method:demo-promotion", "to": "branch:demo-review", "kind": "guards", "source": { "path": "application/controllers/DemoPromotion.php", "startLine": 10, "endLine": 10 }, "certainty": "observed", "method": "synthetic-fixture" }
+  ]
+}

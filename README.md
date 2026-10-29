@@ -10,6 +10,16 @@ CodeArchaeologist AI is an autonomous, AI-powered software investigation platfor
 
 Built for the **Meta Global AI Developer Hackathon 2026**.
 
+## Application routes
+
+- `/` — Repository Intelligence: scan a local directory, import graph JSON, or analyze a public GitHub repository when the isolated server scanner is enabled; then explore modules, features, relationships, and source evidence.
+- `/architecture` — permanent redirect to `/` for existing bookmarks.
+- `/examples/legacy-pricing` — the trusted pricing investigation example, including its existing investigation API and operator-only verification workflow.
+
+Run locally with `npm run dev`. Browser directory scans stay in the browser; see [archaeology documentation](docs/archaeology.md) for scanner limits and the CLI alternative. Controlled public GitHub scans require the server setup in [GitHub ingestion documentation](docs/github-ingestion.md).
+
+GitHub App sign-in and selected private repository scanning are documented in [GitHub App setup](docs/github-app.md).
+
 ## 🎯 The Problem
 
 Millions of software applications contain critical business rules buried inside aging codebases, undocumented functions, and complex dependencies.
@@ -57,11 +67,11 @@ The stack may evolve during development.
 
 ## 🚧 Development Status
 
-**Status: Initial development — October 2026**
+**Status: Repository Intelligence workspace and trusted Legacy Pricing example available — October 2026**
 
 This project is being developed from scratch during the Meta Global AI Developer Hackathon.
 
-Features described above are planned capabilities and will be updated as implementation progresses.
+The repository workspace provides local graph generation and exploration; the broader capabilities listed above remain a development roadmap unless documented as implemented.
 
 ## 🏆 Hackathon
 

@@ -98,6 +98,13 @@ describe("Baseten provider HTTP boundary", () => {
     await expect(provider.complete(request)).rejects.toMatchObject({ code: "HTTP", message: "Baseten API returned HTTP 401" });
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it("retains an upstream 503 status as safe diagnostics without returning its body", async () => {
+    const fetcher = vi.fn(async () => new Response('{"error":"sensitive provider detail"}', { status: 503 }));
+    const provider = new BasetenModelProvider({ apiKey: "test-key", fetcher, maxRetries: 0 });
+    const error = await provider.complete(request).catch((cause: unknown) => cause);
+    expect(error).toMatchObject({ code: "HTTP", diagnostics: { httpStatus: 503 } });
+    expect(JSON.stringify(error)).not.toContain("sensitive provider detail");
+  });
   it("retries rate limits at most once when configured", async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(new Response("", { status: 429 })).mockResolvedValueOnce(new Response(JSON.stringify(payload), { status: 200 }));
     await new BasetenModelProvider({ apiKey: "test-key", fetcher, maxRetries: 1 }).complete(request);

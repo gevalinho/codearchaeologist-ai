@@ -1,4 +1,4 @@
-import type { Edge, Graph, Node, SourceRef } from "../archaeology/scanner";
+import type { Edge, GitHubSourceIdentity, Graph, Node, SourceCoverage, SourceRef } from "../archaeology/scanner";
 
 export const MAX_ARTIFACT_BYTES = 5 * 1024 * 1024;
 export const MAX_VISIBLE_NODES = 36;
@@ -7,6 +7,13 @@ const kinds = new Set(["file", "class", "method", "angular-module", "controller"
 const domains = new Set(["school-management", "healthcare-legacy", "shared-infrastructure", "unknown"]);
 const certainty = new Set(["observed", "inferred"]);
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
+export function validSourceCoverage(value: unknown): value is SourceCoverage {
+  if (!record(value) || Object.keys(value).sort().join() !== "analyzedFiles,eligibleFiles,omittedFiles,partial,selectedFiles,skippedFiles" || ![value.eligibleFiles, value.selectedFiles, value.omittedFiles, value.analyzedFiles, value.skippedFiles].every(count => Number.isSafeInteger(count) && (count as number) >= 0)) return false;
+  return value.eligibleFiles === (value.selectedFiles as number) + (value.omittedFiles as number) && (value.analyzedFiles as number) <= (value.selectedFiles as number) && typeof value.partial === "boolean" && value.partial === ((value.omittedFiles as number) > 0 || (value.skippedFiles as number) > 0 || (value.analyzedFiles as number) < (value.selectedFiles as number));
+}
+export function validGitHubSourceIdentity(value: unknown): value is GitHubSourceIdentity {
+  return record(value) && Object.keys(value).sort().join() === "commitSha,name,owner,visibility" && typeof value.owner === "string" && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(value.owner) && !value.owner.includes("--") && typeof value.name === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(value.name) && !value.name.endsWith(".git") && !value.name.endsWith(".") && typeof value.commitSha === "string" && /^[a-f0-9]{40}$/.test(value.commitSha) && (value.visibility === "public" || value.visibility === "private");
+}
 const string = (value: unknown, max = 500): value is string => typeof value === "string" && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value);
 export function safePath(value: unknown): value is string {
   return string(value, 500) && !value.startsWith("/") && !value.startsWith("\\") && !/^[A-Za-z]:/.test(value) && !value.includes("\\") && value.split("/").every(part => part && part !== "." && part !== "..") && !/[<>]/.test(value);
@@ -22,6 +29,8 @@ export function parseGraph(input: string, byteLength = new TextEncoder().encode(
   if (!string(value.snapshotId, 128) || !Array.isArray(value.nodes) || !Array.isArray(value.edges) || value.nodes.length > 20000 || value.edges.length > 50000) throw new Error("Invalid graph structure or count.");
   if (!Array.isArray(value.warnings) || !value.warnings.every(x => typeof x === "string") || !Array.isArray(value.limitations) || !value.limitations.every(x => typeof x === "string")) throw new Error("Invalid graph metadata.");
   if (!record(value.scan) || !Number.isSafeInteger(value.scan.fileCount) || !Number.isSafeInteger(value.scan.totalBytes) || (value.scan.fileCount as number) < 0 || (value.scan.totalBytes as number) < 0) throw new Error("Invalid scan metadata.");
+  if (value.sourceCoverage !== undefined && (!validSourceCoverage(value.sourceCoverage) || value.sourceCoverage.analyzedFiles !== value.scan.fileCount)) throw new Error("Invalid source coverage metadata.");
+  if (value.githubSource !== undefined && !validGitHubSourceIdentity(value.githubSource)) throw new Error("Invalid GitHub source identity.");
   const nodeIds = new Set<string>();
   for (const node of value.nodes) {
     if (!record(node) || !string(node.id) || !string(node.name) || !kinds.has(node.kind as string) || !domains.has(node.domain as string) || !certainty.has(node.certainty as string) || !string(node.method) || !validSource(node.source)) throw new Error("Invalid node structure or source reference.");
@@ -34,6 +43,14 @@ export function parseGraph(input: string, byteLength = new TextEncoder().encode(
     if (edgeIds.has(edge.id)) throw new Error("Duplicate edge ID.");
     if (!nodeIds.has(edge.from) || !nodeIds.has(edge.to)) throw new Error("Edge references a missing node.");
     edgeIds.add(edge.id);
+  }
+  if (value.rules !== undefined) {
+    if (!Array.isArray(value.rules) || value.rules.length > 1000) throw new Error("Invalid business-rule evidence count.");
+    const ruleIds = new Set<string>();
+    for (const rule of value.rules) {
+      if (!record(rule) || !string(rule.id) || ruleIds.has(rule.id) || !["condition", "validation", "authorization", "state-transition", "calculation"].includes(rule.kind as string) || !string(rule.description) || !string(rule.ownerNodeId) || !nodeIds.has(rule.ownerNodeId) || !validSource(rule.source) || rule.certainty !== "observed" || rule.method !== "deterministic-rule-pattern-v1") throw new Error("Invalid business-rule evidence.");
+      ruleIds.add(rule.id);
+    }
   }
   return value as Graph;
 }

@@ -1,22 +1,22 @@
-import { constants } from "node:fs";
-import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
-import path from "node:path";
-import { randomUUID } from "node:crypto";
-import { scanRepository } from "../src/lib/archaeology/scanner";
+import { ingestRepository } from "../src/lib/archaeology/ingestion";
+
+function argumentsForScan(args: string[]): { repo: string; out?: string } {
+  let repo = process.env.ARCHAEOLOGY_REPO_ROOT;
+  let out: string | undefined;
+  for (let index = 0; index < args.length; index++) {
+    const flag = args[index];
+    if (flag !== "--repo" && flag !== "--out") throw new Error(`Unknown option: ${flag}. Use --repo /absolute/path [--out local-directory].`);
+    const value = args[++index];
+    if (!value || value.startsWith("--")) throw new Error(`${flag} requires a path.`);
+    if (flag === "--repo") repo = value; else out = value;
+  }
+  if (!repo) throw new Error("Set --repo /absolute/path or ARCHAEOLOGY_REPO_ROOT.");
+  if (/^https?:\/\//i.test(repo)) throw new Error("Remote URLs are unsupported; select an authorized local directory.");
+  return { repo, out };
+}
 
 async function main() {
-  const root = process.env.ARCHAEOLOGY_REPO_ROOT;
-  const graph = await scanRepository(root);
-  const directory = path.resolve(".local-archaeology");
-  const artifactName = `graph-${graph.snapshotId}-${randomUUID()}.json`;
-  await mkdir(directory, { mode: 0o700, recursive: true });
-  if (!(await lstat(directory)).isDirectory()) throw new Error("Invalid output directory");
-  const temporary = path.join(directory, `.graph-${randomUUID()}.tmp`);
-  try {
-    const file = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-    try { await file.writeFile(`${JSON.stringify(graph, null, 2)}\n`); } finally { await file.close(); }
-    await rename(temporary, path.join(directory, artifactName));
-  } finally { await unlink(temporary).catch(() => undefined); }
-  process.stdout.write(`Graph saved: .local-archaeology/${artifactName}\nFiles: ${graph.scan.fileCount}; nodes: ${graph.nodes.length}; edges: ${graph.edges.length}; warnings: ${graph.warnings.length}\n`);
+  const { graph, manifest, directory } = await ingestRepository(argumentsForScan(process.argv.slice(2)));
+  process.stdout.write(`Graph saved: ${directory}/graph.json\nManifest saved: ${directory}/manifest.json\nScanned files: ${manifest.sourceCounts.scannedFiles}; extracted nodes: ${graph.nodes.length}; extracted edges: ${graph.edges.length}; warnings: ${graph.warnings.length}\n`);
 }
-main().catch((error: unknown) => { const code = error instanceof Error && "code" in error ? String(error.code) : "SCAN_ERROR"; process.stderr.write(`Repository scan failed (${code}). Check the configured root, source encoding, output permissions, and scan limits.\n`); process.exitCode = 1; });
+main().catch((error: unknown) => { const message = error instanceof Error ? error.message : "Unknown scan error"; process.stderr.write(`Repository ingestion failed: ${message}\n`); process.exitCode = 1; });

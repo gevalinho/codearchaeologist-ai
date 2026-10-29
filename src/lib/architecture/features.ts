@@ -59,6 +59,7 @@ export function investigateFeature(graph: Graph, spec: FeatureSpec): FeatureInve
   const unresolvedQuestions = ["What do the referenced method bodies and guard conditions actually enforce?", "Do route aliases or dynamic calls connect components that this graph does not link?", "What behavior is confirmed by tests or runtime observation?"];
   if (namingOnly.length) unresolvedQuestions.push("How do the name-matched components connect to the observed workflow?");
   const coverageLimitations = ["The scanner extracts source patterns, not complete PHP or JavaScript semantics.", "Names and domain labels suggest relevance; they do not prove behavior or reachability.", "Missing edges do not prove that dependencies are absent."];
+  if (graph.sourceCoverage?.partial) coverageLimitations.push("Partial source analysis: omitted files may contain additional components, relationships, or features.");
   if (missingComponents.length) coverageLimitations.push(`${missingComponents.length} expected component name${missingComponents.length === 1 ? " is" : "s are"} absent from this snapshot.`);
   const nextInspection = ["Open the cited method bodies and confirm the conditions, writes, and route mappings in source.", "Check tests or runtime traces before treating business behavior as verified."];
   if (inferred.length) nextInspection.unshift("Resolve inferred relationships at their cited call sites.");

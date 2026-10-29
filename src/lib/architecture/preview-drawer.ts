@@ -1,6 +1,7 @@
 export type PreviewDrawerState = { open: boolean; expanded: boolean; previewKey: string | null };
 export type PreviewDrawerAction = { type: "open"; previewKey: string } | { type: "close" } | { type: "toggle-expand" } | { type: "feature-change"; previewKey: string | null };
 export const initialPreviewDrawerState = (): PreviewDrawerState => ({ open: false, expanded: false, previewKey: null });
+export const previewDrawerOpen = (state: PreviewDrawerState, currentPreviewKey: string | null): boolean => state.open && currentPreviewKey !== null && state.previewKey === currentPreviewKey;
 
 export function reducePreviewDrawer(state: PreviewDrawerState, action: PreviewDrawerAction): PreviewDrawerState {
   if (action.type === "open") return { open: true, expanded: state.previewKey === action.previewKey ? state.expanded : false, previewKey: action.previewKey };

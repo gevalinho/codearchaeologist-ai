@@ -1,8 +1,8 @@
 # Architecture
 
-## Phase 4 developer demonstration
+## Repository Intelligence and the Legacy Pricing example
 
-The dashboard at `/` shows the trusted `legacy-pricing` source with line numbers, evidence-backed findings, verification status, cases, provider metadata, and limitations. `POST /api/investigate` accepts only `{ "fixtureId": "legacy-pricing" }`, requires explicit live provider configuration and a local opt-in flag, and runs the bounded Phase 2 orchestrator. It never imports or invokes Docker. `GET /api/demo-report` reads only `.local-demo/verification-report.json`, validates its source hash, evidence, reviewed cases, status consistency, and provenance, then displays it. This route never executes code.
+The primary workspace at `/` provides local repository scanning, graph import, module and feature exploration, and evidence inspection. `/architecture` redirects to `/`. The Legacy Pricing example at `/examples/legacy-pricing` shows the trusted `legacy-pricing` source with line numbers, evidence-backed findings, verification status, cases, provider metadata, and limitations. `POST /api/investigate` accepts only `{ "fixtureId": "legacy-pricing" }`, requires explicit live provider configuration and a local opt-in flag, and runs the bounded Phase 2 orchestrator. It never imports or invokes Docker. `GET /api/demo-report` reads only `.local-demo/verification-report.json`, validates its source hash, evidence, reviewed cases, status consistency, and provenance, then displays it. This route never executes code.
 
 The operator-only `npm run demo:report` command runs the same trusted fixture with the explicitly selected live provider, invokes the Phase 3 verifier, validates and sanitizes the report, and writes the ignored local artifact. A report says `ISOLATED_DOCKER` only when actual cases were executed; otherwise it says `NOT_EXECUTED` and retains `NOT_TESTED` or `BLOCKED` statuses. Mock providers are rejected by artifact validation.
 

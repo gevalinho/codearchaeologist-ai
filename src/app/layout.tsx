@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "CodeArchaeologist AI — Investigation Workbench",
-  description: "Evidence-grounded investigation of trusted legacy pricing logic.",
+  title: "CodeArchaeologist AI — Repository Intelligence",
+  description: "Local-first repository architecture, module, and feature intelligence with source evidence.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

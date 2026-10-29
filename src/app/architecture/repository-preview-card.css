@@ -1,0 +1,26 @@
+.workspace-overview-duo{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,.82fr);gap:18px;align-items:stretch}
+.workspace-overview-duo .repository-ai{max-width:none;min-width:0}
+.repository-preview{min-width:0;padding:22px;border:1px solid #31534f;border-radius:9px;background:radial-gradient(circle at top right,#21453e,#13252b 60%);color:#e9f7f2;display:flex;flex-direction:column;gap:17px}
+.repository-preview-top{display:flex;align-items:center;gap:16px;min-width:0}
+.repository-preview-avatar{width:72px;height:72px;flex:none;border:1px solid #527b70;border-radius:16px;overflow:hidden;background:#1b3837;display:grid;place-items:center;color:#87d9c2;font:700 20px var(--font-geist-mono)}
+.repository-preview-avatar img{display:block;width:72px;height:72px;object-fit:cover}
+.repository-preview-top small{font:700 10px var(--font-geist-mono);color:#88dcc4;letter-spacing:.08em}
+.repository-preview-top h2{font-size:20px;margin:7px 0 3px;overflow-wrap:anywhere}
+.repository-preview-top p,.repository-preview-note{font-size:11px;color:#a9c9c0;margin:0}
+.repository-preview-note{margin-top:-10px}
+.repository-preview-link{color:#8de4c9;font-size:12px;text-decoration:underline;text-underline-offset:3px;width:fit-content}
+.repository-preview-link:focus-visible{outline:2px solid #8de4c9;outline-offset:4px}
+.repository-preview-commit{display:flex;justify-content:space-between;gap:12px;padding:11px 0;border-block:1px solid #36554f;font-size:11px;color:#b8d1c9}
+.repository-preview-commit code{color:#eafaf3}
+.repository-preview-coverage{margin-top:auto}
+.repository-preview-coverage>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.repository-preview-coverage strong{font-size:13px}
+.repository-preview-partial{font:700 9px var(--font-geist-mono);color:#f3ca8d;border:1px solid #8d6b3e;border-radius:4px;padding:5px}
+.repository-preview-counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:16px 0}
+.repository-preview-counts span{color:#a9c9c0;font-size:10px}
+.repository-preview-counts b{display:block;color:#eafaf3;font-size:17px;margin-bottom:3px}
+.repository-preview-meter{height:7px;border-radius:9px;background:#28423f;overflow:hidden}
+.repository-preview-meter span{display:block;height:100%;background:#6bdcbb;border-radius:9px}
+.repository-preview-coverage p{color:#abc9c0;font-size:11px;line-height:1.5;margin:12px 0 0}
+@media(max-width:1100px){.workspace-overview-duo{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:480px){.repository-preview-counts{grid-template-columns:repeat(2,minmax(0,1fr))}.repository-preview-top{align-items:flex-start}}

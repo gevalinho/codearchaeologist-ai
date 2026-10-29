@@ -37,6 +37,7 @@ describe("modernization workspace model", () => {
     expect(blueprint.target).toEqual(NEXT_LAYERED);
     expect(blueprint.proposedComponents.every(item => item.provenance === "modernization-recommendation")).toBe(true);
     expect(blueprint.mappings.every(item => item.provenance === "design-recommendation")).toBe(true);
+    expect(new Set(blueprint.mappings.map(item => item.id)).size).toBe(blueprint.mappings.length);
     expect(blueprint.proposedFlow).toHaveLength(7);
     const alternate = buildModernizationBlueprint(feature, graph.snapshotId, { id: "next-spring-v1", title: "Next.js + Spring Boot", frontend: "Next.js", backend: "Spring Boot", status: "proposed" });
     expect(alternate.id).toBe("proposal:promotion:next-spring-v1");
