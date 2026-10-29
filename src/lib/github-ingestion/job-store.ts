@@ -21,32 +21,39 @@ export class SqliteJobStore {
   constructor(file: string, private readonly directory: string, private readonly now: () => number = Date.now) {
     privateDirectory(directory);
     this.db = openStateDatabase(file);
-    // B2 is single-process. A new manager never resumes an interrupted scanner.
-    const interrupted = this.db.prepare("SELECT id,status_json FROM github_jobs WHERE phase IN ('validating-repository-url','preparing-isolated-scanner','fetching-repository','scanning-supported-source-files','generating-architecture-graph','validating-graph')").all() as { id: string; status_json: string }[];
-    for (const row of interrupted) {
-      try {
-        const status = JSON.parse(row.status_json) as GitHubJobStatus;
-        const failed = { ...status, phase: "failed", error: "GitHub analysis was interrupted by a server restart. Retry the scan." };
-        this.db.prepare("UPDATE github_jobs SET status_json = ?, phase = 'failed', cancelled = 1, lease_id = ? WHERE id = ?").run(JSON.stringify(failed), randomUUID(), row.id);
-      }
-      catch { this.db.prepare("DELETE FROM github_jobs WHERE id = ?").run(row.id); }
-    }
+    // An active scan lease may belong to another process. Expired leases are safe to reconcile.
+    const scanLease = this.db.prepare("SELECT expires_at FROM quota_leases WHERE slot = 'global_scan'").get() as { expires_at: number } | undefined;
+    this.reconcile();
     const staging = process.env.CODEARCH_STAGING_DIR;
-    if (staging) {
+    if (staging && (!scanLease || scanLease.expires_at <= this.now())) {
       privateDirectory(staging);
       for (const name of readdirSync(staging)) {
         if (!/^codearchaeologist-github-[A-Za-z0-9]{6}$/.test(name)) continue;
         const candidate = path.join(staging, name);
-        if (lstatSync(candidate).isDirectory()) rmSync(candidate, { recursive: true, force: true });
+        const entry = lstatSync(candidate);
+        if (entry.isDirectory() && entry.mtimeMs <= this.now() - 120_000) rmSync(candidate, { recursive: true, force: true });
       }
     }
     this.sweep();
   }
   close(): void { this.db.close(); }
+  private reconcile(): void {
+    const lease = this.db.prepare("SELECT expires_at FROM quota_leases WHERE slot = 'global_scan'").get() as { expires_at: number } | undefined;
+    if (lease && lease.expires_at > this.now()) return;
+    const interrupted = this.db.prepare("SELECT id,status_json FROM github_jobs WHERE phase IN ('validating-repository-url','preparing-isolated-scanner','fetching-repository','scanning-supported-source-files','generating-architecture-graph','validating-graph')").all() as { id: string; status_json: string }[];
+    for (const row of interrupted) {
+      try {
+        const status = JSON.parse(row.status_json) as GitHubJobStatus;
+        const failed = { ...status, phase: "failed", error: "GitHub analysis was interrupted or exceeded its lease. Retry the scan." };
+        this.db.prepare("UPDATE github_jobs SET status_json = ?, phase = 'failed', cancelled = 1, lease_id = ? WHERE id = ?").run(JSON.stringify(failed), randomUUID(), row.id);
+      } catch { this.db.prepare("DELETE FROM github_jobs WHERE id = ?").run(row.id); }
+    }
+  }
   private file(id: string): string { if (!UUID.test(id)) throw new Error("Invalid artifact identifier."); return path.join(this.directory, `${id}.json`); }
   private remove(id: string): void { if (UUID.test(id)) rmSync(this.file(id), { force: true }); }
   sweep(): void {
     privateDirectory(this.directory);
+    this.reconcile();
     const now = this.now();
     const expired = this.db.prepare("SELECT file_id FROM github_artifacts WHERE expires_at <= ? OR job_id IN (SELECT id FROM github_jobs WHERE expires_at <= ?)").all(now, now) as { file_id: string }[];
     this.db.prepare("DELETE FROM github_jobs WHERE expires_at <= ?").run(now);

@@ -4,8 +4,9 @@ import { MAX_ARTIFACT_BYTES, parseGraph } from "./graph";
 import { InvestigationValidationError, runAutonomousInvestigation, type InvestigationEvent } from "./autonomous-investigation";
 import type { EvidenceOrigin } from "./ai-evidence";
 import { RepositoryAnswerValidationError } from "./ai-repository-chat";
+import { QuotaExceeded, type SqliteQuotaStore, type QuotaLease } from "../github-ingestion/quota-store";
 
-type Dependencies = { enabled: boolean; origin: string | undefined; createProvider: () => ModelProvider; privateAuthorized: (request: Request) => boolean; now?: () => number };
+type Dependencies = { enabled: boolean; origin: string | undefined; createProvider: () => ModelProvider; privateAuthorized: (request: Request) => boolean; now?: () => number; quota?: () => SqliteQuotaStore; subject?: (request: Request) => string };
 const MAX_REQUEST_BYTES = MAX_ARTIFACT_BYTES + 2_048;
 const json = (body: object, status: number) => Response.json(body, { status, headers: { "Cache-Control": "private, no-store" } });
 const origins = new Set<EvidenceOrigin>(["browser-local", "public-github", "private-github", "imported-graph"]);
@@ -46,18 +47,25 @@ export function createAutonomousInvestigationHandler(deps: Dependencies) {
     try { graph = parseGraph(JSON.stringify(body.graph)); } catch { return json({ error: "Invalid bounded graph artifact." }, 400); }
     if (body.origin === "private-github" && !deps.privateAuthorized(request)) return json({ error: "Connect GitHub before investigating a private repository." }, 401);
     const now = deps.now?.() ?? Date.now();
-    if (active || now - lastStarted < 10_000) return json({ error: "AI investigation is busy. Retry shortly." }, 429);
-    active = true; lastStarted = now;
+    let lease: QuotaLease | undefined;
+    if (deps.quota) {
+      try {
+        const quotas = deps.quota(), subject = deps.subject?.(request) ?? "development-local";
+        quotas.checkProviderBudget();
+        quotas.reserve({ scope: "autonomous_daily", subject, limit: 6, windowMs: 86_400_000 });
+        lease = quotas.reserve({ scope: "autonomous_start", subject, limit: 2, windowMs: 3_600_000, slot: "global_ai", leaseMs: 50_000 });
+      } catch (error) { if (error instanceof QuotaExceeded) return new Response(JSON.stringify({ error: "Investigation quota exceeded. Retry later.", rule: error.rule, retryAfter: error.retryAfterSeconds }), { status: 429, headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store", "Retry-After": String(error.retryAfterSeconds) } }); throw error; }
+    } else { if (active || now - lastStarted < 10_000) return json({ error: "AI investigation is busy. Retry shortly." }, 429); active = true; lastStarted = now; }
     const abort = new AbortController();
     const signal = AbortSignal.any([request.signal, abort.signal, AbortSignal.timeout(45_000)]);
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        const emit = (event: InvestigationEvent | { type: "error"; category: string; rule?: string; field?: string; textRule?: string; answerRule?: string; stage?: string; tool?: string; argumentRule?: string }) => { if (!signal.aborted) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)); };
+        const emit = (event: InvestigationEvent | { type: "error"; category: string; rule?: string; field?: string; textRule?: string; answerRule?: string; stage?: string; tool?: string; argumentRule?: string; retryAfter?: number }) => { if (!signal.aborted) controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`)); };
         void (async () => {
           try { await runAutonomousInvestigation(graph, body.origin as EvidenceOrigin, body.goal as string, deps.createProvider(), signal, emit); }
-          catch (cause) { emit(cause instanceof ModelProviderError ? { type: "error", category: `provider_${cause.code.toLowerCase()}` } : cause instanceof RepositoryAnswerValidationError ? { type: "error", category: "final_validation", rule: cause.category, ...(cause.field ? { field: cause.field } : {}), ...(cause.rule ? { textRule: cause.rule } : {}), ...(cause.answerRule ? { answerRule: cause.answerRule } : {}) } : cause instanceof InvestigationValidationError ? { type: "error", category: ["action_structure", "premature_report", "tool_selection", "tool_arguments"].includes(cause.category) ? "action_validation" : "final_validation", rule: cause.category, ...(cause.category === "tool_arguments" ? { stage: "action_selection", ...(cause.tool ? { tool: cause.tool } : {}), ...(cause.argumentRule ? { argumentRule: cause.argumentRule } : {}) } : {}) } : { type: "error", category: signal.aborted ? "cancelled_or_deadline" : "invalid_investigation" }); }
-          finally { active = false; try { controller.close(); } catch { /* The client cancelled the stream. */ } }
+          catch (cause) { emit(cause instanceof QuotaExceeded ? { type: "error", category: "quota_exceeded", rule: cause.rule, retryAfter: cause.retryAfterSeconds } : cause instanceof ModelProviderError ? { type: "error", category: `provider_${cause.code.toLowerCase()}` } : cause instanceof RepositoryAnswerValidationError ? { type: "error", category: "final_validation", rule: cause.category, ...(cause.field ? { field: cause.field } : {}), ...(cause.rule ? { textRule: cause.rule } : {}), ...(cause.answerRule ? { answerRule: cause.answerRule } : {}) } : cause instanceof InvestigationValidationError ? { type: "error", category: ["action_structure", "premature_report", "tool_selection", "tool_arguments"].includes(cause.category) ? "action_validation" : "final_validation", rule: cause.category, ...(cause.category === "tool_arguments" ? { stage: "action_selection", ...(cause.tool ? { tool: cause.tool } : {}), ...(cause.argumentRule ? { argumentRule: cause.argumentRule } : {}) } : {}) } : { type: "error", category: signal.aborted ? "cancelled_or_deadline" : "invalid_investigation" }); }
+          finally { active = false; if (deps.quota) deps.quota().release(lease); try { controller.close(); } catch { /* The client cancelled the stream. */ } }
         })();
       },
       cancel() { abort.abort(); },

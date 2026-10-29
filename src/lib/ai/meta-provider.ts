@@ -1,5 +1,6 @@
 import "server-only";
 import { ModelProviderError, type ModelProvider, type ModelRequest, type ModelResponse } from "./model-provider";
+import type { SqliteQuotaStore } from "../github-ingestion/quota-store";
 
 const DEFAULT_ENDPOINT = "https://api.meta.ai/v1/chat/completions";
 export interface MetaProviderOptions {
@@ -9,6 +10,7 @@ export interface MetaProviderOptions {
   timeoutMs?: number;
   maxRetries?: number;
   fetcher?: typeof fetch;
+  quota?: SqliteQuotaStore;
 }
 type RecordValue = Record<string, unknown>;
 function record(value: unknown): RecordValue | null { return typeof value === "object" && value !== null && !Array.isArray(value) ? value as RecordValue : null; }
@@ -41,6 +43,7 @@ export class MetaModelProvider implements ModelProvider {
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
   private readonly fetcher: typeof fetch;
+  private readonly quota?: SqliteQuotaStore;
 
   constructor(options: MetaProviderOptions = {}) {
     this.apiKey = options.apiKey ?? process.env.MODEL_API_KEY ?? "";
@@ -49,6 +52,7 @@ export class MetaModelProvider implements ModelProvider {
     this.timeoutMs = options.timeoutMs ?? 12_000;
     this.maxRetries = options.maxRetries ?? 2;
     this.fetcher = options.fetcher ?? fetch;
+    this.quota = options.quota;
     if (!this.apiKey) throw new ModelProviderError("CONFIG", "MODEL_API_KEY is required");
     if (!this.model || !Number.isInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 30_000 || !Number.isInteger(this.maxRetries) || this.maxRetries < 0 || this.maxRetries > 2) throw new ModelProviderError("CONFIG", "Invalid Meta provider configuration");
     let url: URL;
@@ -60,6 +64,7 @@ export class MetaModelProvider implements ModelProvider {
     const start = performance.now();
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       if (request.signal.aborted) throw new ModelProviderError("TIMEOUT", "Investigation deadline exceeded");
+      this.quota?.providerAttempt(request.maxOutputTokens + Buffer.byteLength(request.instructions + request.input + JSON.stringify(request.schema)));
       const controller = new AbortController();
       const onAbort = () => controller.abort();
       request.signal.addEventListener("abort", onAbort, { once: true });
@@ -93,6 +98,7 @@ export class MetaModelProvider implements ModelProvider {
         const usage = record(root?.usage);
         const inputTokens = usage?.prompt_tokens;
         const outputTokens = usage?.completion_tokens;
+        if (Number.isSafeInteger(inputTokens) && Number.isSafeInteger(outputTokens)) this.quota?.recordTokens((inputTokens as number) + (outputTokens as number));
         return {
           value,
           model: typeof root?.model === "string" ? root.model : this.model,

@@ -1,5 +1,6 @@
 import "server-only";
 import { ModelProviderError, type ModelDiagnostics, type ModelProvider, type ModelRequest, type ModelResponse } from "./model-provider";
+import type { SqliteQuotaStore } from "../github-ingestion/quota-store";
 
 const DEFAULT_ENDPOINT = "https://inference.baseten.co/v1/chat/completions";
 const DEFAULT_MODEL = "meta-models/muse-spark-open-1026";
@@ -13,6 +14,7 @@ export interface BasetenProviderOptions {
   maxRetries?: number;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   fetcher?: typeof fetch;
+  quota?: SqliteQuotaStore;
 }
 
 type ObjectValue = Record<string, unknown>;
@@ -61,6 +63,7 @@ export class BasetenModelProvider implements ModelProvider {
   private readonly maxRetries: number;
   private readonly reasoningEffort?: "low" | "medium" | "high" | "xhigh";
   private readonly fetcher: typeof fetch;
+  private readonly quota?: SqliteQuotaStore;
 
   constructor(options: BasetenProviderOptions = {}) {
     this.apiKey = options.apiKey ?? process.env.BASETEN_API_KEY ?? "";
@@ -70,6 +73,7 @@ export class BasetenModelProvider implements ModelProvider {
     this.maxRetries = options.maxRetries ?? 2;
     this.reasoningEffort = options.reasoningEffort;
     this.fetcher = options.fetcher ?? fetch;
+    this.quota = options.quota;
     if (!this.apiKey.trim()) throw new ModelProviderError("CONFIG", "BASETEN_API_KEY is required");
     if (!this.model.trim() || !Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 30_000 || !Number.isSafeInteger(this.maxRetries) || this.maxRetries < 0 || this.maxRetries > 2 || (this.reasoningEffort !== undefined && !(["low", "medium", "high", "xhigh"] as unknown[]).includes(this.reasoningEffort))) throw new ModelProviderError("CONFIG", "Invalid Baseten provider configuration");
     let url: URL;
@@ -93,6 +97,7 @@ export class BasetenModelProvider implements ModelProvider {
     });
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       if (request.signal.aborted) throw new ModelProviderError("TIMEOUT", "Investigation deadline exceeded", diagnostics());
+      this.quota?.providerAttempt(request.maxOutputTokens + Buffer.byteLength(request.instructions + request.input + JSON.stringify(request.schema)));
       let httpStatus: number | null = null;
       const controller = new AbortController();
       const onAbort = () => controller.abort();
@@ -133,6 +138,7 @@ export class BasetenModelProvider implements ModelProvider {
           outputTokens: Number.isSafeInteger(outputTokens) && (outputTokens as number) >= 0 ? outputTokens as number : undefined,
           reasoningTokens: Number.isSafeInteger(reasoningTokens) && (reasoningTokens as number) >= 0 ? reasoningTokens as number : undefined,
         };
+        if (counts.inputTokens !== undefined || counts.outputTokens !== undefined) this.quota?.recordTokens((counts.inputTokens ?? 0) + (counts.outputTokens ?? 0));
         const choices = payload?.choices;
         const first = Array.isArray(choices) ? asObject(choices[0]) : null;
         const content = asObject(first?.message)?.content;

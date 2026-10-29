@@ -310,7 +310,7 @@ describe("analysis job lifecycle", () => {
     const manager = new GitHubJobManager(dependencies({ scan: async () => { await gate; return graphJson; }, cleanup }));
     const job = manager.create(repoUrl);
     await vi.waitFor(() => expect(manager.get(job.id)?.phase).toBe("scanning-supported-source-files"));
-    expect(() => manager.create(repoUrl)).toThrow(/already running/);
+    expect(() => manager.create(repoUrl)).toThrow(/quota exceeded/);
     expect(manager.cancel(job.id)?.phase).toBe("cancelled");
     release(); await manager.wait(job.id);
     expect(cleanup).toHaveBeenCalledOnce();
@@ -353,9 +353,9 @@ describe("analysis job lifecycle", () => {
   it("bounds new jobs and expires retained artifacts", async () => {
     let now = Date.now();
     const manager = new GitHubJobManager(dependencies({ now: () => now }));
-    for (let i = 0; i < 3; i++) { const job = manager.create(repoUrl); await manager.wait(job.id); }
-    expect(() => manager.create(repoUrl)).toThrow(/rate limit/);
-    now += 5 * 60_000 + 1;
+    for (let i = 0; i < 2; i++) { const job = manager.create(repoUrl); await manager.wait(job.id); }
+    expect(() => manager.create(repoUrl)).toThrow(/quota exceeded/);
+    now += 60 * 60_000 + 1;
     const next = manager.create(repoUrl); await manager.wait(next.id);
     expect(manager.get(next.id)?.phase).toBe("ready");
   });

@@ -11,12 +11,13 @@ import { authorizeRepository, installationToken, type AuthorizedRepository } fro
 import type { UserSession } from "./session";
 import { SqliteJobStore, type JobOwner } from "./job-store";
 import { privateDirectory } from "./state-db";
+import { SqliteQuotaStore, type QuotaLease } from "./quota-store";
 
 export type GitHubJobPhase = "validating-repository-url" | "preparing-isolated-scanner" | "fetching-repository" | "scanning-supported-source-files" | "generating-architecture-graph" | "validating-graph" | "ready" | "failed" | "cancelled";
 export type GitHubJobDiagnostics = AcquisitionDiagnostics & { dockerReadinessMs?: number; sandboxScanMs?: number; graphValidationMs?: number };
 export type GitHubJobStatus = { id: string; phase: GitHubJobPhase; repository: string; createdAt: string; expiresAt: string; error?: string; diagnostics?: GitHubJobDiagnostics; summary?: { scannedFiles: number; scannedBytes: number; eligibleFiles?: number; selectedFiles?: number; omittedFiles?: number; skippedFiles: number; coverage: "complete-supported-source" | "partial-supported-source"; nodes: number; edges: number; warnings: number } };
 type Artifact = { graphJson: string; manifestJson: string };
-type Job = { status: GitHubJobStatus; repo: GitHubRepository; controller: AbortController; work?: Promise<void>; owner?: JobOwner; user?: UserSession; authorized?: AuthorizedRepository; leaseId: string };
+type Job = { status: GitHubJobStatus; repo: GitHubRepository; controller: AbortController; work?: Promise<void>; owner?: JobOwner; user?: UserSession; authorized?: AuthorizedRepository; leaseId: string; quotaLease?: QuotaLease };
 export type JobDependencies = {
   available: () => Promise<string>;
   acquire: typeof acquirePublicRepository;
@@ -36,16 +37,16 @@ const EXPIRES_MS = 5 * 60_000;
 
 export class GitHubJobManager {
   private live = new Map<string, Job>();
-  private created: number[] = [];
+  private quotas?: SqliteQuotaStore;
   private database?: SqliteJobStore;
   constructor(private readonly deps: JobDependencies = defaults, store?: SqliteJobStore) {
     this.database = store;
   }
   private get store(): SqliteJobStore { return this.database ??= new SqliteJobStore(process.env.CODEARCH_DB_PATH ?? "", process.env.CODEARCH_ARTIFACT_DIR ?? "", this.deps.now); }
+  private get quota(): SqliteQuotaStore { return this.quotas ??= new SqliteQuotaStore(process.env.CODEARCH_DB_PATH ?? "", this.deps.now); }
 
   private sweep() {
     const now = this.deps.now();
-    this.created = this.created.filter(time => now - time < 60_000);
     for (const [id, job] of this.live) if (new Date(job.status.expiresAt).getTime() <= now) { job.controller.abort(); this.live.delete(id); }
     this.store.sweep();
   }
@@ -56,16 +57,16 @@ export class GitHubJobManager {
   }
   create(url: string, privateContext?: { user: UserSession; authorized: AuthorizedRepository }): GitHubJobStatus {
     this.sweep();
-    if (this.created.length >= 3) throw new Error("GitHub analysis rate limit reached. Retry in a minute.");
-    if (this.store.active()) throw new Error("An analysis is already running. Wait or cancel it first.");
-    if (this.store.count() >= 3) throw new Error("Recent analysis capacity is full. Retry after jobs expire.");
     const repo = parsePublicGitHubUrl(url);
+    if (this.store.count() >= 3) throw new Error("Recent analysis capacity is full. Retry after jobs expire.");
+    const quotaLease = this.quota.reserve({ scope: "scan_start", subject: privateContext?.user.id ?? "public-access-key", limit: 2, windowMs: 3_600_000, slot: "global_scan", leaseMs: 95_000 });
     const now = this.deps.now();
     const status: GitHubJobStatus = { id: randomUUID(), phase: "validating-repository-url", repository: `${repo.owner}/${repo.repo}`, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + EXPIRES_MS).toISOString() };
-    const job: Job = { status, repo, controller: new AbortController(), leaseId: randomUUID() };
+    const job: Job = { status, repo, controller: new AbortController(), leaseId: randomUUID(), quotaLease };
     if (privateContext) { const { user, authorized } = privateContext; job.owner = { id: user.id, nonce: user.nonce, installationId: authorized.installationId, repositoryId: authorized.id }; job.user = user; job.authorized = authorized; }
-    this.store.create(status, repo, job.leaseId, job.owner);
-    this.live.set(status.id, job); this.created.push(now);
+    try { this.store.create(status, repo, job.leaseId, job.owner); }
+    catch (error) { this.quota.release(quotaLease); throw error; }
+    this.live.set(status.id, job);
     job.work = this.run(job).catch(() => { if (!job.controller.signal.aborted) this.update(job, "failed", "GitHub analysis failed."); });
     return { ...status };
   }
@@ -83,6 +84,11 @@ export class GitHubJobManager {
     let completed: { artifact: Artifact; summary: NonNullable<GitHubJobStatus["summary"]> } | undefined;
     const deadline = setTimeout(() => { this.update(job, "failed", "GitHub analysis exceeded its 90-second deadline."); job.controller.abort(); }, 90_000);
     deadline.unref();
+    const heartbeat = setInterval(() => {
+      try { if (job.quotaLease && !this.quota.renew(job.quotaLease, 95_000)) { this.update(job, "failed", "Scan lease expired. Retry the analysis."); job.controller.abort(); } }
+      catch { try { this.update(job, "failed", "Scan lease could not be renewed."); } catch { /* The scan is aborted if quota storage is unavailable. */ } job.controller.abort(); }
+    }, 10_000);
+    heartbeat.unref();
     const recordTiming = (values: Partial<GitHubJobDiagnostics>) => { job.status = { ...job.status, diagnostics: { selectedBlobs: 0, completedBlobs: 0, failedBlobs: 0, ...job.status.diagnostics, ...values } }; this.store.update(job.status.id, job.status, job.leaseId); };
     try {
       this.update(job, "preparing-isolated-scanner");
@@ -124,18 +130,26 @@ export class GitHubJobManager {
       if (!job.controller.signal.aborted) this.update(job, "failed", error instanceof Error ? error.message : "GitHub analysis failed.");
     } finally {
       clearTimeout(deadline);
-      let cleaned = true;
-      if (root) await this.deps.cleanup(root).catch(() => { cleaned = false; if (!job.controller.signal.aborted) this.update(job, "failed", "Temporary scanner cleanup failed."); });
-      if (cleaned && completed && !job.controller.signal.aborted) {
-        if (job.owner && job.user) {
-          const fresh = await this.deps.authorize(job.user, job.owner.installationId, job.owner.repositoryId).catch(() => null);
-          if (!fresh || fresh.owner !== job.authorized?.owner || fresh.name !== job.authorized.name) { this.update(job, "failed", "Repository authorization expired or was revoked."); return; }
+      try {
+        let cleaned = true;
+        if (root) await this.deps.cleanup(root).catch(() => { cleaned = false; if (!job.controller.signal.aborted) this.update(job, "failed", "Temporary scanner cleanup failed."); });
+        if (cleaned && completed && !job.controller.signal.aborted) {
+          let authorized = true;
+          if (job.owner && job.user) {
+            const fresh = await this.deps.authorize(job.user, job.owner.installationId, job.owner.repositoryId).catch(() => null);
+            if (!fresh || fresh.owner !== job.authorized?.owner || fresh.name !== job.authorized.name) { this.update(job, "failed", "Repository authorization expired or was revoked."); authorized = false; }
+          }
+          if (authorized) {
+            const ready = { ...job.status, phase: "ready" as const, summary: completed.summary };
+            try { this.store.publish(job.status.id, job.leaseId, completed.artifact, ready); job.status = ready; }
+            catch { this.update(job, "failed", "Could not publish validated scan artifacts."); }
+          }
         }
-        const ready = { ...job.status, phase: "ready" as const, summary: completed.summary };
-        try { this.store.publish(job.status.id, job.leaseId, completed.artifact, ready); job.status = ready; }
-        catch { this.update(job, "failed", "Could not publish validated scan artifacts."); }
+      } finally {
+        clearInterval(heartbeat);
+        this.live.delete(job.status.id);
+        this.quota.release(job.quotaLease);
       }
-      this.live.delete(job.status.id);
     }
   }
   get(id: string, user?: UserSession): GitHubJobStatus | undefined { this.sweep(); const job = this.store.get(id); return this.owned(job, user) ? job?.status : undefined; }

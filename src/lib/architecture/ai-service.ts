@@ -6,8 +6,9 @@ import { aiInstructions, aiInterpretationSchema, parseAiInterpretation } from ".
 import { aiChatInstructions, aiChatSchema, parseChatAnswer, parseChatHistory } from "./ai-chat";
 import { parseRepositoryEvidencePacket } from "./ai-repository-evidence";
 import { parseRepositoryAnswer, RepositoryAnswerValidationError, repositoryChatInstructions, repositoryChatSchema } from "./ai-repository-chat";
+import { QuotaExceeded, type SqliteQuotaStore, type QuotaLease } from "../github-ingestion/quota-store";
 
-type Dependencies = { enabled: boolean; origin: string | undefined; accessKey?: string; maxOutputTokens?: string; createProvider: () => ModelProvider; privateAuthorized: (request: Request) => boolean; developmentAccess?: boolean; now?: () => number };
+type Dependencies = { enabled: boolean; origin: string | undefined; accessKey?: string; maxOutputTokens?: string; createProvider: () => ModelProvider; privateAuthorized: (request: Request) => boolean; developmentAccess?: boolean; now?: () => number; quota?: () => SqliteQuotaStore; subject?: (request: Request) => string };
 const json = (body: object, status: number) => Response.json(body, { status, headers: { "Cache-Control": "private, no-store" } });
 const equal = (a: string, b: string) => { const left = Buffer.from(a), right = Buffer.from(b); return left.length === right.length && timingSafeEqual(left, right); };
 export function interpretationOutputTokens(configured?: string): number {
@@ -60,8 +61,11 @@ export function createAiInterpretationHandler(deps: Dependencies) {
     }
     if (packet.origin === "private-github" && !deps.privateAuthorized(request)) return json({ error: "Connect GitHub before analyzing a private repository." }, 401);
     const now = deps.now?.() ?? Date.now();
-    if (active || now - lastStarted < 10_000) return json({ error: "AI analysis is busy. Retry shortly." }, 429);
-    active = true; lastStarted = now;
+    let lease: QuotaLease | undefined;
+    if (deps.quota) {
+      try { lease = deps.quota().reserve({ scope: "ai_start", subject: deps.subject?.(request) ?? "development-local", limit: 6, windowMs: 3_600_000, slot: "global_ai", leaseMs: 35_000 }); }
+      catch (error) { if (error instanceof QuotaExceeded) return new Response(JSON.stringify({ error: "AI quota exceeded. Retry later.", rule: error.rule, retryAfter: error.retryAfterSeconds }), { status: 429, headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store", "Retry-After": String(error.retryAfterSeconds) } }); throw error; }
+    } else { if (active || now - lastStarted < 10_000) return json({ error: "AI analysis is busy. Retry shortly." }, 429); active = true; lastStarted = now; }
     try {
       const provider = deps.createProvider();
       const response = await provider.complete({ name: repositoryScope ? "repository_chat_v1" : chat ? "feature_chat_v1" : "feature_interpretation_v1", instructions: repositoryScope ? repositoryChatInstructions : chat ? aiChatInstructions : aiInstructions, input: JSON.stringify(chat ? { packet, question, history } : packet), schema: repositoryScope ? repositoryChatSchema : chat ? aiChatSchema : aiInterpretationSchema, maxOutputTokens: interpretationOutputTokens(deps.maxOutputTokens), signal: AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]) });
@@ -69,6 +73,7 @@ export function createAiInterpretationHandler(deps: Dependencies) {
       if (chat) return json({ featureId: packet.featureId, snapshotId: packet.snapshotId, answer: parseChatAnswer(response.value, packet) }, 200);
       return json({ featureId: packet.featureId, snapshotId: packet.snapshotId, interpretation: parseAiInterpretation(response.value, packet) }, 200);
     } catch (cause) {
+      if (cause instanceof QuotaExceeded) return new Response(JSON.stringify({ error: "AI provider budget exceeded. Retry later.", rule: cause.rule, retryAfter: cause.retryAfterSeconds }), { status: 429, headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store", "Retry-After": String(cause.retryAfterSeconds) } });
       const category = cause instanceof ModelProviderError ? `provider_${cause.code.toLowerCase()}` : "invalid_interpretation";
       const upstreamStatus = cause instanceof ModelProviderError && cause.diagnostics?.httpStatus && cause.diagnostics.httpStatus >= 400 && cause.diagnostics.httpStatus <= 599 ? cause.diagnostics.httpStatus : undefined;
       const finishReason = cause instanceof ModelProviderError && ["stop", "length", "content_filter", "tool_calls"].includes(cause.diagnostics?.finishReason ?? "") ? cause.diagnostics?.finishReason : undefined;
@@ -76,6 +81,6 @@ export function createAiInterpretationHandler(deps: Dependencies) {
       const reasoningTokens = cause instanceof ModelProviderError && Number.isSafeInteger(cause.diagnostics?.reasoningTokens) && (cause.diagnostics?.reasoningTokens ?? 0) >= 0 && (cause.diagnostics?.reasoningTokens ?? 0) <= 100_000 ? cause.diagnostics?.reasoningTokens : undefined;
       return json({ error: "AI interpretation could not complete. Check provider configuration or retry later.", diagnostic: { category, ...(cause instanceof RepositoryAnswerValidationError ? { validationCategory: cause.category, ...(cause.field ? { field: cause.field } : {}), ...(cause.rule ? { rule: cause.rule } : {}) } : {}), ...(upstreamStatus ? { upstreamStatus } : {}), ...(finishReason ? { finishReason } : {}), ...(outputTokens !== undefined ? { outputTokens } : {}), ...(reasoningTokens !== undefined ? { reasoningTokens } : {}) } }, 503);
     }
-    finally { active = false; }
+    finally { active = false; if (deps.quota) deps.quota().release(lease); }
   };
 }

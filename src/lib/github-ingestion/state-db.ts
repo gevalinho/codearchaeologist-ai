@@ -30,7 +30,7 @@ export function openStateDatabase(file: string): DatabaseSync {
   try {
     db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;");
     const { user_version: version } = db.prepare("PRAGMA user_version").get() as { user_version: number };
-    if (version > 2) throw new Error("GitHub state database schema is newer than this application.");
+    if (version > 3) throw new Error("GitHub state database schema is newer than this application.");
     if (version < 1) {
       db.exec(`CREATE TABLE IF NOT EXISTS github_sessions (
         handle_hash TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, login TEXT NOT NULL,
@@ -57,6 +57,14 @@ export function openStateDatabase(file: string): DatabaseSync {
         expires_at INTEGER NOT NULL, PRIMARY KEY(job_id,name)
       ) STRICT;
       PRAGMA user_version=2;`);
+    }
+    if (version < 3) {
+      db.exec(`CREATE TABLE IF NOT EXISTS quota_events (scope TEXT NOT NULL, subject TEXT NOT NULL, occurred_at INTEGER NOT NULL) STRICT;
+      CREATE INDEX IF NOT EXISTS quota_events_lookup ON quota_events(scope,subject,occurred_at);
+      CREATE TABLE IF NOT EXISTS quota_leases (slot TEXT PRIMARY KEY NOT NULL, lease_id TEXT NOT NULL, expires_at INTEGER NOT NULL) STRICT;
+      CREATE INDEX IF NOT EXISTS quota_leases_expiry ON quota_leases(expires_at);
+      CREATE TABLE IF NOT EXISTS provider_usage (day INTEGER PRIMARY KEY NOT NULL, attempts INTEGER NOT NULL, reserved_tokens INTEGER NOT NULL, actual_tokens INTEGER NOT NULL) STRICT;
+      PRAGMA user_version=3;`);
     }
     db.exec("COMMIT;");
     return db;

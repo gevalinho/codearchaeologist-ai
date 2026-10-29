@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+vi.mock("server-only", () => ({}));
 import type { Graph } from "../src/lib/archaeology/scanner";
 import { MockModelProvider } from "../src/lib/ai/mock-provider";
+import { QuotaExceeded, type SqliteQuotaStore } from "../src/lib/github-ingestion/quota-store";
 import { runAutonomousInvestigation } from "../src/lib/architecture/autonomous-investigation";
 import { createAutonomousInvestigationHandler } from "../src/lib/architecture/autonomous-service";
 import { parseRepositoryAnswer, RepositoryAnswerValidationError } from "../src/lib/architecture/ai-repository-chat";
@@ -19,6 +21,17 @@ const request = (body: unknown, headers: Record<string, string> = {}) => new Req
 const handler = (provider: MockModelProvider, enabled = true) => createAutonomousInvestigationHandler({ enabled, origin: "http://localhost:3000", createProvider: () => provider, privateAuthorized: () => false, now: () => 20_000 });
 
 describe("autonomous investigation", () => {
+  it("returns a 429 with retry information before opening a stream when the shared quota is exhausted", async () => {
+    const handle = createAutonomousInvestigationHandler({ enabled: true, origin: "http://localhost:3000", createProvider: () => new MockModelProvider([]), privateAuthorized: () => false, quota: () => ({ checkProviderBudget: () => undefined, reserve: () => { throw new QuotaExceeded(60, "autonomous_daily_rate"); } }) as unknown as SqliteQuotaStore });
+    const response = await handle(request({ consent: true, goal: "Inspect authentication", graph, origin: "browser-local" }));
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("60");
+  });
+  it("reports retry information inside an already opened investigation stream", async () => {
+    const response = await handler(new MockModelProvider([new QuotaExceeded(90, "provider_daily_budget")]))(request({ consent: true, goal: "Inspect authentication", graph, origin: "browser-local" }));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('"retryAfter":90');
+  });
   it("executes only validated read-only tools with bounded results and depth", () => {
     expect(normalizeComponentSearch("  Authentication  ")).toEqual(["auth"]);
     expect(normalizeComponentSearch("LoginController")).toEqual(["login", "controller"]);

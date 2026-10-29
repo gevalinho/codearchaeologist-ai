@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -52,11 +52,25 @@ describe("durable GitHub jobs and private artifacts", () => {
     const first = new GitHubJobManager(deps({ scan: async () => { await gate; return JSON.stringify(demoGraph); } }));
     const job = first.create(repo);
     await vi.waitFor(() => expect(first.get(job.id)?.phase).toBe("scanning-supported-source-files"));
+    const db = new DatabaseSync(dbPath);
+    try { db.prepare("UPDATE quota_leases SET expires_at = 0 WHERE slot = 'global_scan'").run(); } finally { db.close(); }
     const second = new GitHubJobManager(deps());
     expect(second.get(job.id)).toMatchObject({ phase: "failed", error: expect.stringContaining("interrupted") });
     release(); await first.wait(job.id);
     expect(second.get(job.id)?.phase).toBe("failed");
     expect(await second.artifact(job.id, "graph.json")).toBeUndefined();
+  });
+
+  it("does not mark another process's active leased scan as interrupted", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const first = new GitHubJobManager(deps({ scan: async () => { await gate; return JSON.stringify(demoGraph); } }));
+    const job = first.create(repo);
+    await vi.waitFor(() => expect(first.get(job.id)?.phase).toBe("scanning-supported-source-files"));
+    const second = new GitHubJobManager(deps());
+    expect(second.get(job.id)?.phase).toBe("scanning-supported-source-files");
+    release(); await first.wait(job.id);
+    expect(second.get(job.id)?.phase).toBe("ready");
   });
 
   it("keeps private ownership and GitHub reauthorization after restart", async () => {
@@ -114,6 +128,7 @@ describe("durable GitHub jobs and private artifacts", () => {
     const abandoned = path.join(stagingDir, "codearchaeologist-github-AbC123");
     const unrelated = path.join(stagingDir, "keep-me");
     mkdirSync(abandoned); mkdirSync(unrelated);
+    const old = new Date(Date.now() - 180_000); utimesSync(abandoned, old, old);
     symlinkSync(unrelated, path.join(stagingDir, "codearchaeologist-github-XyZ789"));
     const store = new SqliteJobStore(dbPath, artifactDir);
     expect(readdirSync(stagingDir).sort()).toEqual(["codearchaeologist-github-XyZ789", "keep-me"]);

@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+vi.mock("server-only", () => ({}));
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Graph } from "../src/lib/archaeology/scanner";
 import { MockModelProvider } from "../src/lib/ai/mock-provider";
 import { ModelProviderError } from "../src/lib/ai/model-provider";
+import { QuotaExceeded, type SqliteQuotaStore } from "../src/lib/github-ingestion/quota-store";
 import { createEvidencePacket, parseEvidencePacket, type EvidenceOrigin } from "../src/lib/architecture/ai-evidence";
 import { parseAiInterpretation, parseAiResponseEnvelope } from "../src/lib/architecture/ai-interpretation";
 import { parseChatAnswer, parseChatHistory } from "../src/lib/architecture/ai-chat";
@@ -30,6 +32,14 @@ const request = (body: unknown, headers: Record<string, string> = {}) => new Req
 const handler = (provider: MockModelProvider, privateAuthorized = false, accessKey = key, maxOutputTokens?: string) => createAiInterpretationHandler({ enabled: true, origin: "https://app.example", accessKey, maxOutputTokens, createProvider: () => provider, privateAuthorized: () => privateAuthorized, now: () => 20_000 });
 
 describe("evidence-grounded interpretation", () => {
+  it("returns shared quota denials as 429 with Retry-After before provider calls", async () => {
+    const provider = new MockModelProvider([]);
+    const handle = createAiInterpretationHandler({ enabled: true, origin: "https://app.example", accessKey: key, createProvider: () => provider, privateAuthorized: () => false, quota: () => ({ reserve: () => { throw new QuotaExceeded(42, "ai_start_rate"); } }) as unknown as SqliteQuotaStore });
+    const response = await handle(request({ packet: packet(), consent: true }));
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("42");
+    expect((await response.json()).rule).toBe("ai_start_rate");
+  });
   it("constructs a deterministic, versioned, references-only packet for local and private sources", () => {
     const local = packet();
     expect(packet()).toEqual(local);
