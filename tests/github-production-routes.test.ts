@@ -7,7 +7,7 @@ const { user, verify, jobs } = vi.hoisted(() => {
   return { user, verify: vi.fn(async (request: Request) => request.headers.get("cookie") === "session=alice" ? user : null), jobs: { createPublic: vi.fn(() => ({ id: "public-job", phase: "validating-repository-url" })), createPrivate: vi.fn(async () => ({ id: "private-job", phase: "validating-repository-url" })), ownedJob: vi.fn(() => true), privateJob: vi.fn(() => false), authorizedStatus: vi.fn(async () => ({ id: "public-job", phase: "ready" })), artifact: vi.fn(async () => "{\"schemaVersion\":\"1.0.0\"}"), cancel: vi.fn(() => ({ id: "public-job", phase: "cancelled" })) } };
 });
 vi.mock("../src/lib/github-ingestion/production-auth", () => ({ verifiedGitHubSession: verify }));
-vi.mock("../src/lib/github-ingestion/jobs", () => ({ githubJobs: jobs }));
+vi.mock("../src/lib/github-ingestion/jobs", () => ({ githubJobs: jobs, productionGithubJobs: () => { throw new Error("Production worker is unavailable in this fixture."); } }));
 
 import { POST as start } from "../src/app/api/github-jobs/route";
 import { GET as status, DELETE as cancel } from "../src/app/api/github-jobs/[id]/route";

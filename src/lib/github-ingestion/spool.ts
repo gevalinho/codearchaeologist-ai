@@ -103,6 +103,19 @@ export function isCancelled(roots: SpoolRoots, owners: SpoolOwners, jobId: strin
   validateSpoolRoots(roots, owners); return !current(roots, owners, jobId, generation) || cancelled(roots, owners, jobId, generation);
 }
 
+/** Worker-side preflight for a dispatcher. The single-job worker repeats full snapshot verification. */
+export function inspectPendingDispatch(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string, now = Date.now()): Dispatch {
+  validateSpoolRoots(roots, owners); actor(owners.workerUid); name(jobId, generation);
+  const value = parseJson(readSafe(dispatchPath(roots, jobId, generation), DISPATCH_LIMIT, owners.webUid, owners.inboxGid));
+  if (!record(value) || !exact(value, "deadline,generation,jobId,manifestSha256,version") || value.version !== 1 || value.jobId !== jobId || value.generation !== generation || typeof value.manifestSha256 !== "string" || !HASH.test(value.manifestSha256) || !Number.isSafeInteger(value.deadline) || (value.deadline as number) <= now || (value.deadline as number) > now + 90_000 || isCancelled(roots, owners, jobId, generation)) throw new Error("Invalid, expired, or cancelled dispatch.");
+  const snapshot = snapshotPath(roots, jobId, generation);
+  directory(snapshot, owners.webUid, owners.inboxGid);
+  const manifest = readSafe(path.join(snapshot, "manifest.json"), MANIFEST_LIMIT, owners.webUid, owners.inboxGid);
+  if (digest(manifest) !== value.manifestSha256) throw new Error("Snapshot manifest integrity failed.");
+  parseManifest(manifest, jobId, generation);
+  return value as Dispatch;
+}
+
 /** Web side: publish immutable selected bytes, then dispatch. No tokens or database data enter the manifest. */
 export function publishSnapshot(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string, files: readonly { path: string; bytes: Buffer }[], deadline: number): Dispatch {
   validateSpoolRoots(roots, owners); actor(owners.webUid); name(jobId, generation);

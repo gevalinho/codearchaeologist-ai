@@ -14,6 +14,7 @@ import { privateDirectory } from "./state-db";
 import { SqliteQuotaStore, type QuotaLease } from "./quota-store";
 import { SqliteDispatchStore, type AcquiredSource } from "./dispatch-store";
 import { readAcquiredSnapshot } from "./acquired-snapshot";
+import { loadProductionWorkerHandoff } from "./production-handoff";
 import { cleanupWebSpool, markCancelled, publishClaimAcknowledgement, publishSnapshot, readClaimReceipt, readResult, readSnapshotManifest, readWorkerHeartbeat, type SpoolOwners, type SpoolRoots } from "./spool";
 
 export type GitHubJobPhase = "validating-repository-url" | "preparing-isolated-scanner" | "fetching-repository" | "scanning-supported-source-files" | "generating-architecture-graph" | "validating-graph" | "ready" | "failed" | "cancelled";
@@ -130,6 +131,7 @@ export class GitHubJobManager {
     this.store.update(job.status.id, job.status, job.leaseId);
   }
   create(url: string, privateContext?: { user: UserSession; authorized: AuthorizedRepository }, publicUser?: UserSession): GitHubJobStatus {
+    if (process.env.NODE_ENV === "production" && !this.handoff) throw new Error("Production scanner handoff is unavailable.");
     this.sweep();
     const repo = parsePublicGitHubUrl(url);
     if (this.store.count() >= 3) throw new Error("Recent analysis capacity is full. Retry after jobs expire.");
@@ -317,3 +319,9 @@ export class GitHubJobManager {
 const singletonKey = Symbol.for("codearchaeologist.github-ingestion.jobs");
 const shared = globalThis as typeof globalThis & { [singletonKey]?: GitHubJobManager };
 export const githubJobs = shared[singletonKey] ??= new GitHubJobManager();
+const productionKey = Symbol.for("codearchaeologist.github-ingestion.production-jobs");
+const productionShared = globalThis as typeof globalThis & { [productionKey]?: GitHubJobManager };
+export function productionGithubJobs(): GitHubJobManager {
+  const handoff = loadProductionWorkerHandoff();
+  return productionShared[productionKey] ??= new GitHubJobManager(defaults, undefined, handoff);
+}

@@ -11,6 +11,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "scanner:worker": "node --experimental-transform-types --import ./scripts/register-types.mjs scripts/scanner-worker.ts",
+    "scanner:dispatcher": "node --experimental-transform-types --import ./scripts/register-types.mjs scripts/scanner-dispatcher.ts",
     "demo:report": "node --env-file=.env.local --experimental-transform-types --import ./scripts/register-types.mjs scripts/generate-demo-report.ts",
     "demo:reverify": "node --experimental-transform-types --import ./scripts/register-types.mjs scripts/reverify-demo-report.ts",
     "archaeology:scan": "node --experimental-transform-types --import ./scripts/register-types.mjs scripts/scan-archaeology.ts",
