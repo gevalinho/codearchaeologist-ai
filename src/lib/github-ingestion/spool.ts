@@ -89,6 +89,8 @@ function activePath(roots: SpoolRoots, jobId: string): string { return path.join
 function cancelledPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.inbox, `${name(jobId, generation)}.cancel`); }
 function claimPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.claims, name(jobId, generation)); }
 function resultPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.outbox, `${name(jobId, generation)}.json`); }
+function receiptPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.outbox, `${name(jobId, generation)}.claim`); }
+function acknowledgementPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.inbox, `${name(jobId, generation)}.ack`); }
 
 function current(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): boolean {
   try { return readSafe(activePath(roots, jobId), 64, owners.webUid, owners.inboxGid).toString("ascii") === generation; } catch { return false; }
@@ -157,7 +159,38 @@ export function claimDispatch(roots: SpoolRoots, owners: SpoolOwners, jobId: str
   mkdirSync(claimPath(roots, jobId, generation), { mode: 0o700 }); // EEXIST prevents duplicate processing.
   fsyncDirectory(roots.claims);
   if (isCancelled(roots, owners, jobId, generation)) throw new Error("Dispatch cancelled during claim.");
+  publishFile(roots.outbox, receiptPath(roots, jobId, generation), Buffer.from(JSON.stringify({ version: 1, jobId, generation, manifestSha256: value.manifestSha256 })), 0o640);
   return { dispatch: value as Dispatch, manifest, snapshot };
+}
+
+/** Web reads the worker-owned receipt without access to worker-private claim state. */
+export function readClaimReceipt(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): string {
+  validateSpoolRoots(roots, owners); actor(owners.webUid); name(jobId, generation);
+  if (isCancelled(roots, owners, jobId, generation)) throw new Error("Claim is stale or cancelled.");
+  const value = parseJson(readSafe(receiptPath(roots, jobId, generation), DISPATCH_LIMIT, owners.workerUid, owners.outboxGid));
+  if (!record(value) || !exact(value, "generation,jobId,manifestSha256,version") || value.version !== 1 || value.jobId !== jobId || value.generation !== generation || typeof value.manifestSha256 !== "string" || !HASH.test(value.manifestSha256)) throw new Error("Invalid claim receipt.");
+  const dispatch = parseJson(readSafe(dispatchPath(roots, jobId, generation), DISPATCH_LIMIT, owners.webUid, owners.inboxGid));
+  if (!record(dispatch) || dispatch.manifestSha256 !== value.manifestSha256) throw new Error("Claim manifest identity mismatch.");
+  return value.manifestSha256;
+}
+
+/** Call only after the web-owned SQLite compare-and-swap has acknowledged this exact generation. */
+export function publishClaimAcknowledgement(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string, manifestSha256: string): void {
+  validateSpoolRoots(roots, owners); actor(owners.webUid); name(jobId, generation);
+  if (!HASH.test(manifestSha256) || readClaimReceipt(roots, owners, jobId, generation) !== manifestSha256) throw new Error("Claim acknowledgement mismatch.");
+  publishFile(roots.inbox, acknowledgementPath(roots, jobId, generation), Buffer.from(JSON.stringify({ version: 1, jobId, generation, manifestSha256 })), 0o640);
+}
+
+/** Worker must verify this web-owned acknowledgement immediately before Docker execution. */
+export function acknowledgedClaim(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string, manifestSha256: string): boolean {
+  validateSpoolRoots(roots, owners); actor(owners.workerUid); name(jobId, generation);
+  if (isCancelled(roots, owners, jobId, generation)) return false;
+  let bytes: Buffer;
+  try { bytes = readSafe(acknowledgementPath(roots, jobId, generation), DISPATCH_LIMIT, owners.webUid, owners.inboxGid); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  const value = parseJson(bytes);
+  if (!record(value) || !exact(value, "generation,jobId,manifestSha256,version") || value.version !== 1 || value.jobId !== jobId || value.generation !== generation || value.manifestSha256 !== manifestSha256) throw new Error("Invalid claim acknowledgement.");
+  return true;
 }
 
 export function markCancelled(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): void {
@@ -172,6 +205,8 @@ export function publishResult(roots: SpoolRoots, owners: SpoolOwners, jobId: str
   validateSpoolRoots(roots, owners); actor(owners.workerUid); name(jobId, generation);
   directory(claimPath(roots, jobId, generation), owners.workerUid, owners.workerGid, false);
   if (isCancelled(roots, owners, jobId, generation)) throw new Error("Result is stale or cancelled.");
+  const dispatch = parseJson(readSafe(dispatchPath(roots, jobId, generation), DISPATCH_LIMIT, owners.webUid, owners.inboxGid));
+  if (!record(dispatch) || typeof dispatch.manifestSha256 !== "string" || !acknowledgedClaim(roots, owners, jobId, generation, dispatch.manifestSha256)) throw new Error("Claim is not acknowledged.");
   const body = Buffer.from(graphJson, "utf8");
   if (!body.length || body.length > MAX_ARTIFACT_BYTES) throw new Error("Scanner result exceeds limit.");
   const envelope = Buffer.from(JSON.stringify({ version: 1, jobId, generation, sha256: digest(body), graphJson }));
@@ -192,7 +227,7 @@ export function readResult(roots: SpoolRoots, owners: SpoolOwners, jobId: string
 /** Web cleanup only; callers must first establish terminal SQLite state and an expired worker claim. */
 export function cleanupWebSpool(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): void {
   validateSpoolRoots(roots, owners); actor(owners.webUid); name(jobId, generation);
-  for (const file of [dispatchPath(roots, jobId, generation), cancelledPath(roots, jobId, generation)]) if (statExists(file)) unlinkSync(file);
+  for (const file of [dispatchPath(roots, jobId, generation), cancelledPath(roots, jobId, generation), acknowledgementPath(roots, jobId, generation)]) if (statExists(file)) unlinkSync(file);
   const active = activePath(roots, jobId); if (current(roots, owners, jobId, generation)) unlinkSync(active);
   const snapshot = snapshotPath(roots, jobId, generation);
   if (statExists(snapshot)) { directory(snapshot, owners.webUid, owners.inboxGid); rmSync(snapshot, { recursive: true, force: false }); }
@@ -204,5 +239,6 @@ export function cleanupWorkerSpool(roots: SpoolRoots, owners: SpoolOwners, jobId
   validateSpoolRoots(roots, owners); actor(owners.workerUid); name(jobId, generation);
   const claim = claimPath(roots, jobId, generation); if (statExists(claim)) { directory(claim, owners.workerUid, owners.workerGid, false); rmSync(claim, { recursive: true, force: false }); }
   const result = resultPath(roots, jobId, generation); if (statExists(result)) { readSafe(result, RESULT_LIMIT, owners.workerUid, owners.outboxGid); unlinkSync(result); }
+  const receipt = receiptPath(roots, jobId, generation); if (statExists(receipt)) { readSafe(receipt, DISPATCH_LIMIT, owners.workerUid, owners.outboxGid); unlinkSync(receipt); }
   fsyncDirectory(roots.claims); fsyncDirectory(roots.outbox);
 }

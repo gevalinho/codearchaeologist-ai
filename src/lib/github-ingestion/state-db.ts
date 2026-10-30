@@ -30,7 +30,7 @@ export function openStateDatabase(file: string): DatabaseSync {
   try {
     db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;");
     const { user_version: version } = db.prepare("PRAGMA user_version").get() as { user_version: number };
-    if (version > 3) throw new Error("GitHub state database schema is newer than this application.");
+    if (version > 4) throw new Error("GitHub state database schema is newer than this application.");
     if (version < 1) {
       db.exec(`CREATE TABLE IF NOT EXISTS github_sessions (
         handle_hash TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, login TEXT NOT NULL,
@@ -65,6 +65,17 @@ export function openStateDatabase(file: string): DatabaseSync {
       CREATE INDEX IF NOT EXISTS quota_leases_expiry ON quota_leases(expires_at);
       CREATE TABLE IF NOT EXISTS provider_usage (day INTEGER PRIMARY KEY NOT NULL, attempts INTEGER NOT NULL, reserved_tokens INTEGER NOT NULL, actual_tokens INTEGER NOT NULL) STRICT;
       PRAGMA user_version=3;`);
+    }
+    if (version < 4) {
+      db.exec(`CREATE TABLE IF NOT EXISTS scanner_dispatches (
+        job_id TEXT PRIMARY KEY NOT NULL REFERENCES github_jobs(id) ON DELETE CASCADE,
+        generation TEXT NOT NULL, job_lease_id TEXT NOT NULL,
+        manifest_sha256 TEXT NOT NULL, deadline_at INTEGER NOT NULL,
+        claim_ack_at INTEGER, heartbeat_at INTEGER, result_sha256 TEXT,
+        cancelled INTEGER NOT NULL DEFAULT 0 CHECK(cancelled IN (0,1))
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS scanner_dispatches_deadline ON scanner_dispatches(deadline_at);
+      PRAGMA user_version=4;`);
     }
     db.exec("COMMIT;");
     return db;

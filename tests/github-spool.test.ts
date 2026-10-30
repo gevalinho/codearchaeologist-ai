@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 vi.mock("server-only", () => ({}));
-import { claimDispatch, cleanupWebSpool, cleanupWorkerSpool, isCancelled, markCancelled, publishResult, publishSnapshot, readResult, validId, type SpoolOwners, type SpoolRoots } from "../src/lib/github-ingestion/spool";
+import { acknowledgedClaim, claimDispatch, cleanupWebSpool, cleanupWorkerSpool, isCancelled, markCancelled, publishClaimAcknowledgement, publishResult, publishSnapshot, readClaimReceipt, readResult, validId, type SpoolOwners, type SpoolRoots } from "../src/lib/github-ingestion/spool";
 
 let root: string, roots: SpoolRoots, owners: SpoolOwners;
 const id = () => randomUUID();
@@ -26,6 +26,10 @@ describe("isolated scanner spool foundation", () => {
     const dispatch = publishSnapshot(roots, owners, job, generation, source(), Date.now() + 60_000);
     expect(dispatch.jobId).toBe(job);
     expect(claimDispatch(roots, owners, job, generation).manifest.files).toHaveLength(1);
+    const receipt = readClaimReceipt(roots, owners, job, generation);
+    expect(acknowledgedClaim(roots, owners, job, generation, receipt)).toBe(false);
+    publishClaimAcknowledgement(roots, owners, job, generation, receipt);
+    expect(acknowledgedClaim(roots, owners, job, generation, receipt)).toBe(true);
     expect(() => claimDispatch(roots, owners, job, generation)).toThrow();
     publishResult(roots, owners, job, generation, '{"schemaVersion":"1.0.0"}');
     expect(readResult(roots, owners, job, generation)).toContain("schemaVersion");
@@ -82,10 +86,26 @@ describe("isolated scanner spool foundation", () => {
     expect(claimDispatch(roots, owners, job, second).dispatch.generation).toBe(second);
   });
 
+  it("rejects substituted acknowledgement identities and cancellation after acknowledgement", () => {
+    const job = id(), generation = id();
+    publishSnapshot(roots, owners, job, generation, source(), Date.now() + 60_000);
+    claimDispatch(roots, owners, job, generation);
+    const receipt = readClaimReceipt(roots, owners, job, generation);
+    expect(() => publishClaimAcknowledgement(roots, owners, job, generation, "b".repeat(64))).toThrow(/mismatch/);
+    publishClaimAcknowledgement(roots, owners, job, generation, receipt);
+    expect(() => acknowledgedClaim(roots, owners, job, generation, "b".repeat(64))).toThrow(/Invalid/);
+    markCancelled(roots, owners, job, generation);
+    expect(acknowledgedClaim(roots, owners, job, generation, receipt)).toBe(false);
+    expect(() => publishResult(roots, owners, job, generation, "{}")).toThrow(/cancelled/);
+  });
+
   it("rejects tampered results and unsafe spool roots", () => {
     const job = id(), generation = id();
     publishSnapshot(roots, owners, job, generation, source(), Date.now() + 60_000);
     claimDispatch(roots, owners, job, generation);
+    const receipt = readClaimReceipt(roots, owners, job, generation);
+    expect(() => publishResult(roots, owners, job, generation, "{}")).toThrow(/acknowledged/);
+    publishClaimAcknowledgement(roots, owners, job, generation, receipt);
     publishResult(roots, owners, job, generation, "{}");
     const result = path.join(roots.outbox, `${job}.${generation}.json`);
     const body = JSON.parse(readFileSync(result, "utf8"));
