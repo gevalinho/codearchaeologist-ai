@@ -2,6 +2,7 @@ import "server-only";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmod, copyFile, mkdir } from "node:fs/promises";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 const IMAGE = "node:22-bookworm-slim";
@@ -12,7 +13,18 @@ export type DockerCommand = (args: string[], timeoutMs: number, maxOutput: numbe
 
 /** B5 boundary: production web requests cannot execute Docker until a separate worker handoff exists. */
 export function assertScannerProcessBoundary(): void {
-  if (process.env.NODE_ENV === "production") throw new Error("Isolated scanner unavailable: production worker handoff is not configured.");
+  if (process.env.NODE_ENV !== "production") return;
+  try {
+    const fd = openSync("/etc/codearchaeologist/scanner-worker-identity.json", constants.O_RDONLY | constants.O_NOFOLLOW);
+    let bytes: Buffer;
+    try {
+      const info = fstatSync(fd);
+      if (!info.isFile() || info.uid !== 0 || info.nlink !== 1 || info.mode & 0o022 || info.size < 1 || info.size > 256) throw new Error("invalid identity file");
+      bytes = readFileSync(fd);
+    } finally { closeSync(fd); }
+    const identity = JSON.parse(bytes.toString("utf8")) as { workerUid?: unknown; webUid?: unknown };
+    if (!identity || Object.keys(identity).sort().join() !== "webUid,workerUid" || !Number.isSafeInteger(identity.workerUid) || !Number.isSafeInteger(identity.webUid) || (identity.workerUid as number) <= 0 || (identity.webUid as number) <= 0 || identity.workerUid === identity.webUid || typeof process.getuid !== "function" || process.getuid() !== identity.workerUid) throw new Error("invalid worker identity");
+  } catch { throw new Error("Isolated scanner unavailable: production worker identity is not verified."); }
 }
 
 export const dockerCommand: DockerCommand = (args, timeoutMs, maxOutput, signal) => new Promise(resolve => {

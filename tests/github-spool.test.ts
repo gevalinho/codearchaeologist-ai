@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 vi.mock("server-only", () => ({}));
-import { acknowledgedClaim, claimDispatch, cleanupWebSpool, cleanupWorkerSpool, isCancelled, markCancelled, publishClaimAcknowledgement, publishResult, publishSnapshot, readClaimReceipt, readResult, validId, type SpoolOwners, type SpoolRoots } from "../src/lib/github-ingestion/spool";
+import { acknowledgedClaim, claimDispatch, cleanupWebSpool, cleanupWorkerSpool, isCancelled, markCancelled, publishClaimAcknowledgement, publishResult, publishSnapshot, publishWorkerHeartbeat, readClaimReceipt, readResult, readWorkerHeartbeat, validId, type SpoolOwners, type SpoolRoots } from "../src/lib/github-ingestion/spool";
 
 let root: string, roots: SpoolRoots, owners: SpoolOwners;
 const id = () => randomUUID();
@@ -30,6 +30,8 @@ describe("isolated scanner spool foundation", () => {
     expect(acknowledgedClaim(roots, owners, job, generation, receipt)).toBe(false);
     publishClaimAcknowledgement(roots, owners, job, generation, receipt);
     expect(acknowledgedClaim(roots, owners, job, generation, receipt)).toBe(true);
+    publishWorkerHeartbeat(roots, owners, job, generation);
+    expect(readWorkerHeartbeat(roots, owners, job, generation)).toBeGreaterThan(0);
     expect(() => claimDispatch(roots, owners, job, generation)).toThrow();
     publishResult(roots, owners, job, generation, '{"schemaVersion":"1.0.0"}');
     expect(readResult(roots, owners, job, generation)).toContain("schemaVersion");

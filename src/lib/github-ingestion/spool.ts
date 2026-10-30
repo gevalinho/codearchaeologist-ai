@@ -91,6 +91,7 @@ function claimPath(roots: SpoolRoots, jobId: string, generation: string): string
 function resultPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.outbox, `${name(jobId, generation)}.json`); }
 function receiptPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.outbox, `${name(jobId, generation)}.claim`); }
 function acknowledgementPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.inbox, `${name(jobId, generation)}.ack`); }
+function heartbeatPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.outbox, `${name(jobId, generation)}.heartbeat`); }
 
 function current(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): boolean {
   try { return readSafe(activePath(roots, jobId), 64, owners.webUid, owners.inboxGid).toString("ascii") === generation; } catch { return false; }
@@ -193,6 +194,27 @@ export function acknowledgedClaim(roots: SpoolRoots, owners: SpoolOwners, jobId:
   return true;
 }
 
+/** Worker heartbeat is an observable file, not a SQLite lease renewal. */
+export function publishWorkerHeartbeat(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string, at = Date.now()): void {
+  validateSpoolRoots(roots, owners); actor(owners.workerUid); name(jobId, generation);
+  if (!Number.isSafeInteger(at) || isCancelled(roots, owners, jobId, generation)) throw new Error("Worker heartbeat is stale or cancelled.");
+  directory(claimPath(roots, jobId, generation), owners.workerUid, owners.workerGid, false);
+  const temporary = path.join(roots.outbox, `.${randomUUID()}.heartbeat`);
+  try {
+    writeNew(temporary, Buffer.from(JSON.stringify({ version: 1, jobId, generation, at })), 0o640);
+    renameSync(temporary, heartbeatPath(roots, jobId, generation)); fsyncDirectory(roots.outbox);
+  } finally { rmSync(temporary, { force: true }); }
+}
+
+/** Web validates the worker-owned heartbeat before renewing its SQLite state. */
+export function readWorkerHeartbeat(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): number {
+  validateSpoolRoots(roots, owners); actor(owners.webUid); name(jobId, generation);
+  if (isCancelled(roots, owners, jobId, generation)) throw new Error("Worker heartbeat is stale or cancelled.");
+  const value = parseJson(readSafe(heartbeatPath(roots, jobId, generation), DISPATCH_LIMIT, owners.workerUid, owners.outboxGid));
+  if (!record(value) || !exact(value, "at,generation,jobId,version") || value.version !== 1 || value.jobId !== jobId || value.generation !== generation || !Number.isSafeInteger(value.at) || (value.at as number) > Date.now() + 5_000) throw new Error("Invalid worker heartbeat.");
+  return value.at as number;
+}
+
 export function markCancelled(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): void {
   validateSpoolRoots(roots, owners); actor(owners.webUid); name(jobId, generation);
   const marker = cancelledPath(roots, jobId, generation);
@@ -240,5 +262,6 @@ export function cleanupWorkerSpool(roots: SpoolRoots, owners: SpoolOwners, jobId
   const claim = claimPath(roots, jobId, generation); if (statExists(claim)) { directory(claim, owners.workerUid, owners.workerGid, false); rmSync(claim, { recursive: true, force: false }); }
   const result = resultPath(roots, jobId, generation); if (statExists(result)) { readSafe(result, RESULT_LIMIT, owners.workerUid, owners.outboxGid); unlinkSync(result); }
   const receipt = receiptPath(roots, jobId, generation); if (statExists(receipt)) { readSafe(receipt, DISPATCH_LIMIT, owners.workerUid, owners.outboxGid); unlinkSync(receipt); }
+  const heartbeat = heartbeatPath(roots, jobId, generation); if (statExists(heartbeat)) { readSafe(heartbeat, DISPATCH_LIMIT, owners.workerUid, owners.outboxGid); unlinkSync(heartbeat); }
   fsyncDirectory(roots.claims); fsyncDirectory(roots.outbox);
 }
