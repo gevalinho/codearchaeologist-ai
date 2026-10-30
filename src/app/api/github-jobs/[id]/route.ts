@@ -8,7 +8,7 @@ export async function GET(request: Request, context: Context) {
   const { id } = await context.params;
   const user = await verifiedGitHubSession(request);
   if (!user || !githubJobs.ownedJob(id, user)) return jobJson({ error: "GitHub analysis job was not found or has expired." }, 404);
-  const status = await githubJobs.authorizedStatus(id, user);
+  const status = await githubJobs.authorizedStatus(id, user, () => verifiedGitHubSession(request));
   return status ? jobJson(status, 200) : jobJson({ error: "GitHub analysis job was not found or has expired." }, 404);
 }
 export async function DELETE(request: Request, context: Context) {
@@ -16,7 +16,7 @@ export async function DELETE(request: Request, context: Context) {
   const { id } = await context.params;
   const user = await verifiedGitHubSession(request);
   if (!user || !githubJobs.ownedJob(id, user)) return jobJson({ error: "GitHub analysis job was not found or has expired." }, 404);
-  if (!await githubJobs.authorizedStatus(id, user)) return jobJson({ error: "GitHub analysis job was not found or has expired." }, 404);
+  if (!await githubJobs.authorizedStatus(id, user, () => verifiedGitHubSession(request))) return jobJson({ error: "GitHub analysis job was not found or has expired." }, 404);
   const status = githubJobs.cancel(id, user);
   return status ? jobJson(status, 200) : jobJson({ error: "GitHub analysis job was not found or has expired." }, 404);
 }

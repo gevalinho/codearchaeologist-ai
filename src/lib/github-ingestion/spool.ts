@@ -44,11 +44,11 @@ function publishFile(dir: string, target: string, bytes: Buffer, mode: number): 
   try { writeNew(temporary, bytes, mode); linkSync(temporary, target); fsyncDirectory(dir); }
   finally { rmSync(temporary, { force: true }); fsyncDirectory(dir); }
 }
-function readSafe(file: string, maxBytes: number, uid: number, gid: number): Buffer {
+function readSafe(file: string, maxBytes: number, uid: number, gid: number, allowEmpty = false): Buffer {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = fstatSync(fd);
-    if (!info.isFile() || info.nlink !== 1 || info.uid !== uid || info.gid !== gid || info.mode & 0o027 || info.size < 1 || info.size > maxBytes) throw new Error("Unsafe spool file.");
+    if (!info.isFile() || info.nlink !== 1 || info.uid !== uid || info.gid !== gid || info.mode & 0o027 || info.size < (allowEmpty ? 0 : 1) || info.size > maxBytes) throw new Error("Unsafe spool file.");
     return readFileSync(fd);
   } finally { closeSync(fd); }
 }
@@ -60,7 +60,7 @@ function parseManifest(bytes: Buffer, jobId: string, generation: string): Snapsh
   if (!record(value) || !exact(value, "files,generation,jobId,totalBytes,version") || value.version !== 1 || value.jobId !== jobId || value.generation !== generation || !Array.isArray(value.files) || value.files.length < 1 || value.files.length > DEFAULT_SCAN_LIMITS.maxFiles || !Number.isSafeInteger(value.totalBytes) || (value.totalBytes as number) > DEFAULT_SCAN_LIMITS.maxTotalBytes) throw new Error("Invalid snapshot manifest.");
   const paths = new Set<string>(); let sum = 0;
   for (const item of value.files) {
-    if (!record(item) || !exact(item, "bytes,path,sha256") || !safePath(item.path) || !allowedSource(item.path) || paths.has(item.path) || !Number.isSafeInteger(item.bytes) || (item.bytes as number) < 1 || (item.bytes as number) > DEFAULT_SCAN_LIMITS.maxFileBytes || typeof item.sha256 !== "string" || !HASH.test(item.sha256)) throw new Error("Invalid snapshot file record.");
+    if (!record(item) || !exact(item, "bytes,path,sha256") || !safePath(item.path) || !allowedSource(item.path) || paths.has(item.path) || !Number.isSafeInteger(item.bytes) || (item.bytes as number) < 0 || (item.bytes as number) > DEFAULT_SCAN_LIMITS.maxFileBytes || typeof item.sha256 !== "string" || !HASH.test(item.sha256)) throw new Error("Invalid snapshot file record.");
     paths.add(item.path); sum += item.bytes as number;
   }
   if (sum !== value.totalBytes) throw new Error("Snapshot byte count mismatch.");
@@ -109,7 +109,7 @@ export function publishSnapshot(roots: SpoolRoots, owners: SpoolOwners, jobId: s
   if (!Number.isSafeInteger(deadline) || deadline <= Date.now() || deadline > Date.now() + 5 * 60_000 || files.length < 1 || files.length > DEFAULT_SCAN_LIMITS.maxFiles) throw new Error("Invalid spool deadline or file count.");
   const entries: FileRecord[] = []; const seen = new Set<string>(); let totalBytes = 0;
   for (const file of files) {
-    if (!safePath(file.path) || file.path === "manifest.json" || !allowedSource(file.path) || seen.has(file.path) || !Buffer.isBuffer(file.bytes) || file.bytes.length < 1 || file.bytes.length > DEFAULT_SCAN_LIMITS.maxFileBytes) throw new Error("Invalid source snapshot file.");
+    if (!safePath(file.path) || file.path === "manifest.json" || !allowedSource(file.path) || seen.has(file.path) || !Buffer.isBuffer(file.bytes) || file.bytes.length > DEFAULT_SCAN_LIMITS.maxFileBytes) throw new Error("Invalid source snapshot file.");
     seen.add(file.path); totalBytes += file.bytes.length;
     if (totalBytes > DEFAULT_SCAN_LIMITS.maxTotalBytes) throw new Error("Source snapshot exceeds byte limit.");
     entries.push({ path: file.path, bytes: file.bytes.length, sha256: digest(file.bytes) });
@@ -154,7 +154,7 @@ export function claimDispatch(roots: SpoolRoots, owners: SpoolOwners, jobId: str
   for (const file of manifest.files) {
     const parts = file.path.split("/"); let parent = snapshot;
     for (const part of parts.slice(0, -1)) { parent = path.join(parent, part); directory(parent, owners.webUid, owners.inboxGid); }
-    const bytes = readSafe(path.join(snapshot, file.path), DEFAULT_SCAN_LIMITS.maxFileBytes, owners.webUid, owners.inboxGid);
+    const bytes = readSafe(path.join(snapshot, file.path), DEFAULT_SCAN_LIMITS.maxFileBytes, owners.webUid, owners.inboxGid, true);
     if (bytes.length !== file.bytes || digest(bytes) !== file.sha256) throw new Error("Source snapshot integrity failed.");
   }
   mkdirSync(claimPath(roots, jobId, generation), { mode: 0o700 }); // EEXIST prevents duplicate processing.
@@ -179,7 +179,13 @@ export function readClaimReceipt(roots: SpoolRoots, owners: SpoolOwners, jobId: 
 export function publishClaimAcknowledgement(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string, manifestSha256: string): void {
   validateSpoolRoots(roots, owners); actor(owners.webUid); name(jobId, generation);
   if (!HASH.test(manifestSha256) || readClaimReceipt(roots, owners, jobId, generation) !== manifestSha256) throw new Error("Claim acknowledgement mismatch.");
-  publishFile(roots.inbox, acknowledgementPath(roots, jobId, generation), Buffer.from(JSON.stringify({ version: 1, jobId, generation, manifestSha256 })), 0o640);
+  const target = acknowledgementPath(roots, jobId, generation);
+  const bytes = Buffer.from(JSON.stringify({ version: 1, jobId, generation, manifestSha256 }));
+  if (statExists(target)) {
+    if (!readSafe(target, DISPATCH_LIMIT, owners.webUid, owners.inboxGid).equals(bytes)) throw new Error("Existing claim acknowledgement mismatch.");
+    return;
+  }
+  publishFile(roots.inbox, target, bytes, 0o640);
 }
 
 /** Worker must verify this web-owned acknowledgement immediately before Docker execution. */
@@ -244,6 +250,18 @@ export function readResult(roots: SpoolRoots, owners: SpoolOwners, jobId: string
   const body = Buffer.from(value.graphJson, "utf8");
   if (!body.length || body.length > MAX_ARTIFACT_BYTES || digest(body) !== value.sha256) throw new Error("Scanner result integrity failed.");
   return value.graphJson;
+}
+
+/** Web-side provenance check for result source references. */
+export function readSnapshotManifest(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): SnapshotManifest {
+  validateSpoolRoots(roots, owners); actor(owners.webUid); name(jobId, generation);
+  const dispatch = parseJson(readSafe(dispatchPath(roots, jobId, generation), DISPATCH_LIMIT, owners.webUid, owners.inboxGid));
+  if (!record(dispatch) || dispatch.jobId !== jobId || dispatch.generation !== generation || typeof dispatch.manifestSha256 !== "string" || !HASH.test(dispatch.manifestSha256)) throw new Error("Invalid snapshot dispatch.");
+  const snapshot = snapshotPath(roots, jobId, generation);
+  directory(snapshot, owners.webUid, owners.inboxGid);
+  const bytes = readSafe(path.join(snapshot, "manifest.json"), MANIFEST_LIMIT, owners.webUid, owners.inboxGid);
+  if (digest(bytes) !== dispatch.manifestSha256) throw new Error("Snapshot manifest integrity failed.");
+  return parseManifest(bytes, jobId, generation);
 }
 
 /** Web cleanup only; callers must first establish terminal SQLite state and an expired worker claim. */

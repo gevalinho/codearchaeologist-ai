@@ -80,7 +80,7 @@ describe("durable encrypted GitHub sessions", () => {
     expect(() => sessionKeyVersion("0")).toThrow();
     store.close();
     const db = new DatabaseSync(file);
-    try { db.exec("PRAGMA user_version=5"); } finally { db.close(); }
+    try { db.exec("PRAGMA user_version=6"); } finally { db.close(); }
     expect(() => new SqliteSessionStore(file, key, 1)).toThrow(/newer/);
     store = new SqliteSessionStore(path.join(root, "fresh.sqlite"), key, 1);
   });

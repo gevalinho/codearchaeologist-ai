@@ -30,7 +30,7 @@ export function openStateDatabase(file: string): DatabaseSync {
   try {
     db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; BEGIN IMMEDIATE;");
     const { user_version: version } = db.prepare("PRAGMA user_version").get() as { user_version: number };
-    if (version > 4) throw new Error("GitHub state database schema is newer than this application.");
+    if (version > 5) throw new Error("GitHub state database schema is newer than this application.");
     if (version < 1) {
       db.exec(`CREATE TABLE IF NOT EXISTS github_sessions (
         handle_hash TEXT PRIMARY KEY NOT NULL, user_id TEXT NOT NULL, login TEXT NOT NULL,
@@ -76,6 +76,11 @@ export function openStateDatabase(file: string): DatabaseSync {
       ) STRICT;
       CREATE INDEX IF NOT EXISTS scanner_dispatches_deadline ON scanner_dispatches(deadline_at);
       PRAGMA user_version=4;`);
+    }
+    if (version < 5) {
+      db.exec(`ALTER TABLE scanner_dispatches ADD COLUMN source_json TEXT;
+      ALTER TABLE scanner_dispatches ADD COLUMN quota_lease_id TEXT;
+      PRAGMA user_version=5;`);
     }
     db.exec("COMMIT;");
     return db;

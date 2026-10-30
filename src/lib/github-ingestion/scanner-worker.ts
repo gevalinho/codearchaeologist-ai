@@ -49,7 +49,7 @@ export function copyVerifiedSnapshot(snapshot: string, manifest: SnapshotManifes
       let bytes: Buffer;
       try {
         const info = fstatSync(sourceFd);
-        if (!info.isFile() || info.nlink !== 1 || info.uid !== config.owners.webUid || info.gid !== config.owners.inboxGid || info.mode & 0o027 || info.size !== file.bytes || info.size < 1 || info.size > DEFAULT_SCAN_LIMITS.maxFileBytes) throw new Error("Unsafe source file.");
+        if (!info.isFile() || info.nlink !== 1 || info.uid !== config.owners.webUid || info.gid !== config.owners.inboxGid || info.mode & 0o027 || info.size !== file.bytes || info.size < 0 || info.size > DEFAULT_SCAN_LIMITS.maxFileBytes) throw new Error("Unsafe source file.");
         bytes = readFileSync(sourceFd);
       } finally { closeSync(sourceFd); }
       if (bytes.length !== file.bytes || createHash("sha256").update(bytes).digest("hex") !== file.sha256) throw new Error("Source snapshot changed after claim.");

@@ -93,13 +93,26 @@ export class SqliteJobStore {
     this.db.prepare("UPDATE github_jobs SET status_json = ?, phase = 'cancelled', cancelled = 1 WHERE id = ?").run(JSON.stringify(status), id);
     this.removeArtifacts(id);
   }
+  failWorker(id: string, leaseId: string, generation: string, error: string): boolean {
+    if (!UUID.test(id) || !UUID.test(leaseId) || !UUID.test(generation)) return false;
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      const job = this.get(id);
+      const dispatch = this.db.prepare("SELECT 1 FROM scanner_dispatches WHERE job_id=? AND job_lease_id=? AND generation=?").get(id, leaseId, generation);
+      if (!job || !dispatch || job.leaseId !== leaseId || job.cancelled || !ACTIVE.has(job.status.phase)) { this.db.exec("ROLLBACK;"); return false; }
+      const failed = { ...job.status, phase: "failed", error };
+      this.db.prepare("UPDATE github_jobs SET status_json=?,phase='failed',cancelled=1 WHERE id=? AND lease_id=? AND cancelled=0").run(JSON.stringify(failed), id, leaseId);
+      this.db.prepare("UPDATE scanner_dispatches SET cancelled=1 WHERE job_id=? AND generation=?").run(id, generation);
+      this.db.exec("COMMIT;"); return true;
+    } catch (cause) { this.db.exec("ROLLBACK;"); throw cause; }
+  }
   invalidate(id: string, status: GitHubJobStatus): void { this.cancel(id, { ...status, phase: "cancelled" }); }
   private removeArtifacts(id: string): void {
     const rows = this.db.prepare("SELECT file_id FROM github_artifacts WHERE job_id = ?").all(id) as { file_id: string }[];
     this.db.prepare("DELETE FROM github_artifacts WHERE job_id = ?").run(id);
     for (const row of rows) this.remove(row.file_id);
   }
-  publish(id: string, leaseId: string, artifacts: { graphJson: string; manifestJson: string }, ready: GitHubJobStatus): void {
+  publish(id: string, leaseId: string, artifacts: { graphJson: string; manifestJson: string }, ready: GitHubJobStatus, dispatch?: { generation: string; resultSha256: string }): void {
     privateDirectory(this.directory);
     const written: string[] = [];
     try {
@@ -119,6 +132,10 @@ export class SqliteJobStore {
       try {
         const job = this.get(id);
         if (!job || job.cancelled || job.leaseId !== leaseId || !ACTIVE.has(job.status.phase)) throw new Error("Job was cancelled or expired.");
+        if (dispatch) {
+          const current = this.db.prepare("SELECT 1 FROM scanner_dispatches WHERE job_id=? AND generation=? AND job_lease_id=? AND result_sha256=? AND claim_ack_at IS NOT NULL AND cancelled=0 AND deadline_at>?").get(id, dispatch.generation, leaseId, dispatch.resultSha256, this.now());
+          if (!current) throw new Error("Worker result does not match the active dispatch.");
+        }
         for (const row of rows) this.db.prepare("INSERT INTO github_artifacts (job_id,name,file_id,sha256,byte_size,expires_at) VALUES (?,?,?,?,?,?)").run(id, row.name, row.fileId, row.sha, row.size, Date.parse(ready.expiresAt));
         this.update(id, ready, leaseId);
         this.db.exec("COMMIT;");
