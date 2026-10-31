@@ -4,7 +4,16 @@ const nextConfig: NextConfig = {
   /* config options here */
   output: "standalone",
   outputFileTracingExcludes: {
-    "/*": ["**/.env", "**/.env.*", "**/.git", "**/.git/**"],
+    "/*": [
+      "**/.env",
+      "**/.env.*",
+      "**/.git",
+      "**/.git/**",
+      "./docs/**",
+      "./tests/*.test.ts",
+      "./tests/*.test.tsx",
+      "./tests/fixtures/architecture/**",
+    ],
   },
   cacheComponents: true,
   partialPrefetching: true,
