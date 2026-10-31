@@ -257,7 +257,6 @@ export function publishResult(roots: SpoolRoots, owners: SpoolOwners, jobId: str
 export function readResult(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): string {
   validateSpoolRoots(roots, owners); actor(owners.webUid); name(jobId, generation);
   if (isCancelled(roots, owners, jobId, generation)) throw new Error("Result is stale or cancelled.");
-  directory(claimPath(roots, jobId, generation), owners.workerUid, owners.workerGid, false);
   const value = parseJson(readSafe(resultPath(roots, jobId, generation), RESULT_LIMIT, owners.workerUid, owners.outboxGid));
   if (!record(value) || !exact(value, "generation,graphJson,jobId,sha256,version") || value.version !== 1 || value.jobId !== jobId || value.generation !== generation || typeof value.graphJson !== "string" || typeof value.sha256 !== "string" || !HASH.test(value.sha256)) throw new Error("Invalid scanner result.");
   const body = Buffer.from(value.graphJson, "utf8");

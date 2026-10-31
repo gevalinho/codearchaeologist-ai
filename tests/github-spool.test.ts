@@ -21,7 +21,7 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 describe("isolated scanner spool foundation", () => {
-  it("publishes a bounded snapshot, claims once, and verifies a result", () => {
+  it("publishes a bounded snapshot, claims once, and reads results across the private claim boundary", () => {
     const job = id(), generation = id();
     const dispatch = publishSnapshot(roots, owners, job, generation, source(), Date.now() + 60_000);
     expect(dispatch.jobId).toBe(job);
@@ -34,7 +34,13 @@ describe("isolated scanner spool foundation", () => {
     expect(readWorkerHeartbeat(roots, owners, job, generation)).toBeGreaterThan(0);
     expect(() => claimDispatch(roots, owners, job, generation)).toThrow();
     publishResult(roots, owners, job, generation, '{"schemaVersion":"1.0.0"}');
-    expect(readResult(roots, owners, job, generation)).toContain("schemaVersion");
+    const claim = path.join(roots.claims, `${job}.${generation}`);
+    chmodSync(claim, 0);
+    try {
+      expect(readResult(roots, owners, job, generation)).toContain("schemaVersion");
+    } finally {
+      chmodSync(claim, 0o700);
+    }
     cleanupWorkerSpool(roots, owners, job, generation);
     cleanupWebSpool(roots, owners, job, generation);
   });
@@ -110,8 +116,12 @@ describe("isolated scanner spool foundation", () => {
     publishClaimAcknowledgement(roots, owners, job, generation, receipt);
     publishResult(roots, owners, job, generation, "{}");
     const result = path.join(roots.outbox, `${job}.${generation}.json`);
-    const body = JSON.parse(readFileSync(result, "utf8"));
-    writeFileSync(result, JSON.stringify({ ...body, graphJson: "changed" }));
+    const envelope = JSON.parse(readFileSync(result, "utf8"));
+    writeFileSync(result, "{");
+    expect(() => readResult(roots, owners, job, generation)).toThrow(/Malformed/);
+    writeFileSync(result, JSON.stringify({ ...envelope, jobId: id() }));
+    expect(() => readResult(roots, owners, job, generation)).toThrow(/Invalid scanner result/);
+    writeFileSync(result, JSON.stringify({ ...envelope, graphJson: "changed" }));
     expect(() => readResult(roots, owners, job, generation)).toThrow(/integrity/);
     chmodSync(roots.inbox, 0o777);
     expect(() => isCancelled(roots, owners, job, generation)).toThrow(/permissions/);
