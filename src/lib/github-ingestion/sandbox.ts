@@ -264,21 +264,39 @@ export async function scannerAvailable(
     );
   const baseline = await probe("unconfined"),
     enforced = await probe("builtin");
-  const filters = (result: CommandResult): number | null => {
-    if (result.exitCode !== 0 || result.timedOut || result.failed) return null;
-    const match = /^Seccomp:2\nSeccomp_filters:([0-9]+)\n?$/.exec(
+  const seccompStatus = (
+    result: CommandResult,
+  ): { mode: number; filters: number } | null => {
+    if (result.exitCode !== 0 || result.timedOut || result.failed) {
+      return null;
+    }
+
+    const match = /^Seccomp:([0-9]+)\nSeccomp_filters:([0-9]+)$/.exec(
       result.stdout.trimEnd(),
     );
-    return match && Number.isSafeInteger(Number(match[1]))
-      ? Number(match[1])
-      : null;
+
+    if (!match) return null;
+
+    const mode = Number(match[1]);
+    const filters = Number(match[2]);
+
+    if (!Number.isSafeInteger(mode) || !Number.isSafeInteger(filters)) {
+      return null;
+    }
+
+    return { mode, filters };
   };
-  const baselineCount = filters(baseline),
-    enforcedCount = filters(enforced);
+
+  const baselineStatus = seccompStatus(baseline);
+  const enforcedStatus = seccompStatus(enforced);
+
   if (
-    baselineCount === null ||
-    enforcedCount === null ||
-    enforcedCount <= baselineCount
+    baselineStatus === null ||
+    enforcedStatus === null ||
+    baselineStatus.mode !== 0 ||
+    baselineStatus.filters !== 0 ||
+    enforcedStatus.mode !== 2 ||
+    enforcedStatus.filters < 1
   )
     throw new Error(
       "Isolated scanner unavailable: Docker seccomp enforcement could not be verified. Enable the built-in profile for scanner containers.",

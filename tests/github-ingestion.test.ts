@@ -230,13 +230,15 @@ describe("server authorization and sandbox", () => {
   it("requires Docker seccomp and a preinstalled image", async () => {
     const imageId = `sha256:${"a".repeat(64)}`;
     const success = (stdout: string) => ({ exitCode: 0, stdout, timedOut: false, failed: false });
-    const execute = (security: string, baseline = 2, enforced = 3): DockerCommand => async args => args[0] === "info" ? success(security) : args[0] === "image" ? success(imageId) : args.includes("--security-opt=seccomp=unconfined") ? success(`Seccomp:2\nSeccomp_filters:${baseline}\n`) : success(`Seccomp:2\nSeccomp_filters:${enforced}\n`);
+    const execute = (security: string, baselineMode = 0, baselineFilters = 0, enforcedMode = 2, enforcedFilters = 1): DockerCommand => async args => args[0] === "info" ? success(security) : args[0] === "image" ? success(imageId) : args.includes("--security-opt=seccomp=unconfined") ? success(`Seccomp:${baselineMode}\nSeccomp_filters:${baselineFilters}\n`) : success(`Seccomp:${enforcedMode}\nSeccomp_filters:${enforcedFilters}\n`);
     expect(await scannerAvailable(execute('["name=seccomp,profile=builtin"]'))).toBe(imageId);
     expect(await scannerAvailable(execute('["name=seccomp,profile=unconfined"]'))).toBe(imageId);
     expect(await scannerAvailable(execute('["name=seccomp"]'))).toBe(imageId);
     await expect(scannerAvailable(async () => ({ exitCode: 1, stdout: "", timedOut: false, failed: true }))).rejects.toThrow(/unavailable/);
     for (const security of ["[]", '["name=seccomp,profile=unconfined-extra,unsupported=true"]', '["not-seccomp"]', "not-json"]) await expect(scannerAvailable(execute(security))).rejects.toThrow(/seccomp|unreadable/);
-    await expect(scannerAvailable(execute('["name=seccomp,profile=unconfined"]', 2, 2))).rejects.toThrow(/enforcement could not be verified/);
+    await expect(scannerAvailable(execute('["name=seccomp,profile=builtin"]', 0, 1))).rejects.toThrow(/enforcement could not be verified/);
+    await expect(scannerAvailable(execute('["name=seccomp,profile=builtin"]', 0, 0, 0, 0))).rejects.toThrow(/enforcement could not be verified/);
+    await expect(scannerAvailable(execute('["name=seccomp,profile=builtin"]', 0, 0, 2, 0))).rejects.toThrow(/enforcement could not be verified/);
     await expect(scannerAvailable(execute('["name=seccomp,profile=builtin"]', 2, 1))).rejects.toThrow(/enforcement could not be verified/);
     const base = execute('["name=seccomp,profile=unconfined"]');
     const unsupported: DockerCommand = async (args, timeout, limit) => args.includes("--security-opt=seccomp=builtin") ? { exitCode: 1, stdout: "", timedOut: false, failed: true } : base(args, timeout, limit);
