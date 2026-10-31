@@ -7,7 +7,7 @@ import { MockModelProvider } from "../src/lib/ai/mock-provider";
 import { allowedSource } from "../src/lib/archaeology/selection";
 import { createEvidencePacket, parseEvidencePacket } from "../src/lib/architecture/ai-evidence";
 import { parseChatHistory } from "../src/lib/architecture/ai-chat";
-import { parseRepositoryAnswer, RepositoryAnswerValidationError, repositoryChatInstructions } from "../src/lib/architecture/ai-repository-chat";
+import { parseRepositoryAnswer, RepositoryAnswerValidationError, repositoryChatInstructions, repositoryChatSchema } from "../src/lib/architecture/ai-repository-chat";
 import { createRepositoryEvidencePacket, parseRepositoryEvidencePacket } from "../src/lib/architecture/ai-repository-evidence";
 import { createAiInterpretationHandler } from "../src/lib/architecture/ai-service";
 import { discoverFeatures } from "../src/lib/architecture/features";
@@ -56,12 +56,60 @@ describe("repository-wide AI evidence", () => {
 
   it("requires candidate anchors for purpose inference and rejects invented citations", () => {
     const packet = repo(), ids = ["feature:login", "feature:registration"].map(id => packet.candidates.find(candidate => candidate.id === id)!.evidenceId);
-    const answer = { schemaVersion: "1.0.0", status: "inference", answer: "Login and registration candidates suggest authentication capability; runtime behavior is unverified.", evidenceIds: ids, uncertainty: "Static names alone do not prove reachability." };
+    const answer = { schemaVersion: "1.0.0", status: "inference", answer: "The Login candidate and Registration candidate suggest authentication capability; runtime behavior is unverified.", evidenceIds: ids, uncertainty: "Static names alone do not prove reachability." };
     expect(parseRepositoryAnswer(answer, packet)).toEqual(answer);
     expect(() => parseRepositoryAnswer({ ...answer, evidenceIds: [ids[0]] }, packet)).toThrow();
     expect(() => parseRepositoryAnswer({ ...answer, evidenceIds: ["invented", ids[0]] }, packet)).toThrow();
+    expect(() => parseRepositoryAnswer({ ...answer, evidenceIds: packet.items.slice(0, 5).map(item => item.id) }, packet)).toThrowError(new RepositoryAnswerValidationError("citation_limit"));
     expect(() => parseRepositoryAnswer({ ...answer, status: "insufficient-evidence" }, packet)).toThrow();
     expect(() => parseChatHistory([{ role: "user", text: "Question" }, { role: "assistant", text: "From another feature", evidenceIds: ["foreign"] }], packet)).toThrow();
+  });
+
+  it("requires exact anchors for named candidates without matching ordinary words or overlapping IDs", () => {
+    const packet = repo();
+    const login = packet.candidates.find(candidate => candidate.id === "feature:login")!;
+    const registration = packet.candidates.find(candidate => candidate.id === "feature:registration")!;
+    const core = packet.candidates.find(candidate => candidate.id === "feature:core")!;
+    const password = packet.candidates.find(candidate => candidate.id === "feature:password")!;
+    const reset = packet.candidates.find(candidate => candidate.id === "feature:reset")!;
+    const answer = (status: string, text: string, evidenceIds: string[]) => ({
+      schemaVersion: "1.0.0", status, answer: text, evidenceIds, uncertainty: "Runtime behavior remains unverified.",
+    });
+
+    expect(() => parseRepositoryAnswer(
+      answer("observed-structure", "The Registration candidate is represented in the graph.", [login.evidenceId]),
+      packet,
+    )).toThrowError(new RepositoryAnswerValidationError("candidate_anchor"));
+
+    const overlappingPacket = parseRepositoryEvidencePacket({
+      ...packet,
+      candidates: packet.candidates.map(candidate => candidate.id === reset.id
+        ? { ...candidate, title: "Password reset candidate" }
+        : candidate),
+    });
+    expect(parseRepositoryAnswer(
+      answer("observed-structure", "The Password reset candidate is represented in the graph.", [reset.evidenceId]),
+      overlappingPacket,
+    )).toBeTruthy();
+    expect(() => parseRepositoryAnswer(
+      answer("observed-structure", "The Password candidate is represented in the graph.", [reset.evidenceId]),
+      overlappingPacket,
+    )).toThrowError(new RepositoryAnswerValidationError("candidate_anchor"));
+
+    const insufficient = answer(
+      "insufficient-evidence",
+      "Insufficient evidence to infer repository purpose from the Core framework reference.",
+      [],
+    );
+    expect(core.title).toBe("Core candidate");
+    expect(parseRepositoryAnswer(insufficient, packet)).toEqual(insufficient);
+
+    const passwordAnswer = answer(
+      "observed-structure",
+      "The Login candidate, Registration candidate, and Password candidate are represented.",
+      [login.evidenceId, registration.evidenceId, password.evidenceId],
+    );
+    expect(parseRepositoryAnswer(passwordAnswer, packet)).toEqual(passwordAnswer);
   });
 
   it("classifies repository answer failures without exposing model text", () => {
@@ -74,8 +122,8 @@ describe("repository-wide AI evidence", () => {
       [{ ...answer, status: "other" }, "classification"],
       [{ ...answer, evidenceIds: [ids[0], "invented"] }, "citation_unknown"],
       [{ ...answer, evidenceIds: [ids[0]] }, "purpose_anchors"],
-      [{ ...answer, answer: "Login and registration candidates suggest authentication.", evidenceIds: [ids[0]] }, "purpose_anchors"],
-      [{ ...answer, status: "observed-structure", evidenceIds: [ids[0]] }, "candidate_anchor"],
+      [{ ...answer, answer: "The Login candidate and Registration candidate suggest authentication.", evidenceIds: [ids[0]] }, "purpose_anchors"],
+      [{ ...answer, status: "observed-structure", answer: "The Login candidate and Registration candidate are represented.", evidenceIds: [ids[0]] }, "candidate_anchor"],
       [{ ...insufficient, evidenceIds: [ids[0]] }, "insufficient_evidence"],
       [{ ...answer, schemaVersion: "2.0.0" }, "structure"],
     ] as const;
@@ -84,7 +132,11 @@ describe("repository-wide AI evidence", () => {
       catch (cause) { expect(cause).toBeInstanceOf(RepositoryAnswerValidationError); expect((cause as RepositoryAnswerValidationError).category).toBe(category); }
     }
     expect(repositoryChatInstructions).toContain("no more than four named candidates");
+    expect(repositoryChatInstructions).toContain("exact title");
+    expect(repositoryChatInstructions).toContain("exact anchor evidence ID");
     expect(repositoryChatInstructions).toContain("For any status inference, cite at least two distinct candidate anchors");
+    expect(repositoryChatSchema.properties.evidenceIds.maxItems).toBe(4);
+    expect(repositoryChatSchema.properties.evidenceIds.uniqueItems).toBe(true);
   });
 
   it("returns only a safe repository validation category while feature interpretation stays independent", async () => {
@@ -156,6 +208,8 @@ describe("repository-wide AI evidence", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ scope: "repository", snapshotId: packet.snapshotId, answer });
     expect(provider.requests[0].name).toBe("repository_chat_v1");
+    expect(provider.requests[0].instructions).toContain("exact anchor evidence ID");
+    expect(provider.requests[0].schema).toEqual(repositoryChatSchema);
     expect(provider.requests[0].input).not.toContain("sourceBody");
   });
 
