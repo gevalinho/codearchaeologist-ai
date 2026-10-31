@@ -53,15 +53,34 @@ export function appJwt(): string {
   return `${input}.${sign("RSA-SHA256", Buffer.from(input), createPrivateKey(pem)).toString("base64url")}`;
 }
 export type AuthorizedRepository = { id: number; owner: string; name: string; private: boolean; installationId: number };
-export async function repositoriesForUser(user: UserSession, fetchFixed: FixedHostFetch = fixedHostFetch): Promise<AuthorizedRepository[]> {
-  const signal = new AbortController().signal;
-  const installations = json(await fetchFixed("api.github.com", "/user/installations?per_page=100", 1_000_000, signal, { bearer: user.token }));
-  if (!Array.isArray(installations.installations) || !Number.isSafeInteger(installations.total_count) || (installations.total_count as number) > 100) throw new Error("Too many GitHub installations; narrow access or contact the operator.");
-  const output: AuthorizedRepository[] = [];
-  for (const raw of installations.installations) {
+export type UserInstallation = { id: number; account: string; accountType: "User" | "Organization"; contentsRead: boolean; suspended: boolean };
+export async function installationsForUser(user: UserSession, fetchFixed: FixedHostFetch = fixedHostFetch): Promise<UserInstallation[]> {
+  const appId = Number(process.env.GITHUB_APP_ID);
+  if (!numberId(appId)) throw new Error("GitHub App identity is unavailable.");
+  const response = json(await fetchFixed("api.github.com", "/user/installations?per_page=100", 1_000_000, new AbortController().signal, { bearer: user.token }));
+  if (!Array.isArray(response.installations) || !Number.isSafeInteger(response.total_count) || (response.total_count as number) > 100 || response.installations.length !== response.total_count) throw new Error("GitHub installation list is incomplete or too large.");
+  const output: UserInstallation[] = [];
+  for (const raw of response.installations) {
     if (!raw || typeof raw !== "object") continue;
-    const installation = raw as Record<string, unknown>;
-    if (!numberId(installation.id) || installation.suspended_at || !installation.permissions || typeof installation.permissions !== "object" || (installation.permissions as Record<string, unknown>).contents !== "read") continue;
+    const installation = raw as Record<string, unknown>, account = installation.account as Record<string, unknown> | undefined;
+    if (!numberId(installation.id) || installation.app_id !== appId || typeof account?.login !== "string" || !/^[A-Za-z0-9-]{1,39}$/.test(account.login) || !["User", "Organization"].includes(installation.target_type as string)) continue;
+    const permissions = installation.permissions as Record<string, unknown> | undefined;
+    output.push({ id: installation.id, account: account.login, accountType: installation.target_type as "User" | "Organization", contentsRead: permissions?.contents === "read", suspended: installation.suspended_at != null });
+  }
+  return output;
+}
+export function installationSettingsUrl(installation: UserInstallation): string {
+  if (!numberId(installation.id) || !/^[A-Za-z0-9-]{1,39}$/.test(installation.account)) throw new Error("Invalid GitHub installation.");
+  if (installation.accountType === "Organization") return `https://github.com/organizations/${installation.account}/settings/installations/${installation.id}`;
+  if (installation.accountType === "User") return `https://github.com/settings/installations/${installation.id}`;
+  throw new Error("Invalid GitHub installation account type.");
+}
+export async function repositoriesForUser(user: UserSession, fetchFixed: FixedHostFetch = fixedHostFetch, knownInstallations?: UserInstallation[]): Promise<AuthorizedRepository[]> {
+  const signal = new AbortController().signal;
+  const installations = knownInstallations ?? await installationsForUser(user, fetchFixed);
+  const output: AuthorizedRepository[] = [];
+  for (const installation of installations) {
+    if (installation.suspended || !installation.contentsRead) continue;
     const page = json(await fetchFixed("api.github.com", `/user/installations/${installation.id}/repositories?per_page=100`, 2_000_000, signal, { bearer: user.token }));
     if (!Array.isArray(page.repositories) || !Number.isSafeInteger(page.total_count) || (page.total_count as number) > 100) throw new Error("Too many GitHub repositories in an installation; narrow access or contact the operator.");
     for (const item of page.repositories) {
