@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 vi.mock("server-only", () => ({}));
 import type { Graph } from "../src/lib/archaeology/scanner";
 import { MockModelProvider } from "../src/lib/ai/mock-provider";
-import { QuotaExceeded, type SqliteQuotaStore } from "../src/lib/github-ingestion/quota-store";
+import { QuotaExceeded, SqliteQuotaStore } from "../src/lib/github-ingestion/quota-store";
 import { runAutonomousInvestigation } from "../src/lib/architecture/autonomous-investigation";
 import { createAutonomousInvestigationHandler } from "../src/lib/architecture/autonomous-service";
 import { parseRepositoryAnswer, RepositoryAnswerValidationError } from "../src/lib/architecture/ai-repository-chat";
@@ -19,13 +23,55 @@ const action = (tool: string, query = "", componentId = "", depth = 0) => ({ too
 const insufficient = { schemaVersion: "1.0.0", status: "insufficient-evidence", answer: "Insufficient evidence to verify the requested behavior.", evidenceIds: [], uncertainty: "Partial source analysis; omitted files may contain more evidence." };
 const request = (body: unknown, headers: Record<string, string> = {}) => new Request("http://localhost:3000/api/autonomous-investigation", { method: "POST", headers: { Origin: "http://localhost:3000", "Content-Type": "application/json", ...headers }, body: JSON.stringify(body) });
 const handler = (provider: MockModelProvider, enabled = true) => createAutonomousInvestigationHandler({ enabled, origin: "http://localhost:3000", createProvider: () => provider, privateAuthorized: () => false, now: () => 20_000 });
+function quotaFixture() {
+  const root = mkdtempSync(path.join(tmpdir(), "codearch-autonomous-quota-"));
+  mkdirSync(path.join(root, "private"), { mode: 0o700 });
+  const file = path.join(root, "private", "state.sqlite");
+  const quota = new SqliteQuotaStore(file, () => 20_000);
+  return { file, quota, close: () => { quota.close(); rmSync(root, { recursive: true, force: true }); } };
+}
+function quotaCount(file: string, scope: string): number {
+  const db = new DatabaseSync(file);
+  try { return (db.prepare("SELECT COUNT(*) AS count FROM quota_events WHERE scope = ?").get(scope) as { count: number }).count; }
+  finally { db.close(); }
+}
 
 describe("autonomous investigation", () => {
   it("returns a 429 with retry information before opening a stream when the shared quota is exhausted", async () => {
-    const handle = createAutonomousInvestigationHandler({ enabled: true, origin: "http://localhost:3000", createProvider: () => new MockModelProvider([]), privateAuthorized: () => false, quota: () => ({ checkProviderBudget: () => undefined, reserve: () => { throw new QuotaExceeded(60, "autonomous_daily_rate"); } }) as unknown as SqliteQuotaStore });
+    const handle = createAutonomousInvestigationHandler({ enabled: true, origin: "http://localhost:3000", createProvider: () => new MockModelProvider([]), privateAuthorized: () => false, quota: () => ({ checkProviderBudget: () => undefined, reserveMany: () => { throw new QuotaExceeded(60, "autonomous_daily_rate"); } }) as unknown as SqliteQuotaStore });
     const response = await handle(request({ consent: true, goal: "Inspect authentication", graph, origin: "browser-local" }));
     expect(response.status).toBe(429);
     expect(response.headers.get("Retry-After")).toBe("60");
+  });
+  it("does not consume daily quota when the hourly autonomous limit rejects", async () => {
+    const fixture = quotaFixture();
+    try {
+      const hourlyPolicy = { scope: "autonomous_start", subject: "development-local", limit: 2, windowMs: 3_600_000 };
+      fixture.quota.reserve(hourlyPolicy);
+      fixture.quota.reserve(hourlyPolicy);
+      const createProvider = vi.fn(() => new MockModelProvider([]));
+      const handle = createAutonomousInvestigationHandler({ enabled: true, origin: "http://localhost:3000", createProvider, privateAuthorized: () => false, quota: () => fixture.quota });
+      const response = await handle(request({ consent: true, goal: "Inspect authentication", graph, origin: "browser-local" }));
+      expect(response.status).toBe(429);
+      expect(response.headers.get("Retry-After")).toBe("3600");
+      expect(quotaCount(fixture.file, "autonomous_daily")).toBe(0);
+      expect(quotaCount(fixture.file, "autonomous_start")).toBe(2);
+      expect(createProvider).not.toHaveBeenCalled();
+    } finally { fixture.close(); }
+  });
+  it("does not consume daily quota when the global AI lease is occupied", async () => {
+    const fixture = quotaFixture();
+    try {
+      fixture.quota.reserve({ scope: "other_start", subject: "other", limit: 1, windowMs: 3_600_000, slot: "global_ai", leaseMs: 50_000 });
+      const createProvider = vi.fn(() => new MockModelProvider([]));
+      const handle = createAutonomousInvestigationHandler({ enabled: true, origin: "http://localhost:3000", createProvider, privateAuthorized: () => false, quota: () => fixture.quota });
+      const response = await handle(request({ consent: true, goal: "Inspect authentication", graph, origin: "browser-local" }));
+      expect(response.status).toBe(429);
+      expect(response.headers.get("Retry-After")).toBe("50");
+      expect(quotaCount(fixture.file, "autonomous_daily")).toBe(0);
+      expect(quotaCount(fixture.file, "autonomous_start")).toBe(0);
+      expect(createProvider).not.toHaveBeenCalled();
+    } finally { fixture.close(); }
   });
   it("reports retry information inside an already opened investigation stream", async () => {
     const response = await handler(new MockModelProvider([new QuotaExceeded(90, "provider_daily_budget")]))(request({ consent: true, goal: "Inspect authentication", graph, origin: "browser-local" }));

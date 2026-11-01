@@ -62,8 +62,10 @@ export function createAutonomousInvestigationHandler(deps: Dependencies) {
       try {
         const quotas = deps.quota(), subject = user?.id ?? deps.subject?.(request) ?? "development-local";
         quotas.checkProviderBudget();
-        quotas.reserve({ scope: "autonomous_daily", subject, limit: 6, windowMs: 86_400_000 });
-        lease = quotas.reserve({ scope: "autonomous_start", subject, limit: 2, windowMs: 3_600_000, slot: "global_ai", leaseMs: 50_000 });
+        [, lease] = quotas.reserveMany([
+          { scope: "autonomous_daily", subject, limit: 6, windowMs: 86_400_000 },
+          { scope: "autonomous_start", subject, limit: 2, windowMs: 3_600_000, slot: "global_ai", leaseMs: 50_000 },
+        ]);
       } catch (error) { if (error instanceof QuotaExceeded) return new Response(JSON.stringify({ error: "Investigation quota exceeded. Retry later.", rule: error.rule, retryAfter: error.retryAfterSeconds }), { status: 429, headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store", "Retry-After": String(error.retryAfterSeconds) } }); throw error; }
     } else { if (active || now - lastStarted < 10_000) return json({ error: "AI investigation is busy. Retry shortly." }, 429); active = true; lastStarted = now; }
     const abort = new AbortController();

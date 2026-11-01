@@ -27,6 +27,36 @@ describe("shared SQLite quotas", () => {
     expect(outcomes.find(item => item.status === "rejected")?.reason).toBeInstanceOf(QuotaExceeded);
     expect(second.reserve(policy("bob"))).toBeUndefined();
   });
+  it("reserves multiple policies and their lease atomically", () => {
+    const [daily, start] = first.reserveMany([
+      { scope: "autonomous_daily", subject: "alice", limit: 6, windowMs: 86_400_000 },
+      { scope: "autonomous_start", subject: "alice", limit: 2, windowMs: 3_600_000, slot: "global_ai", leaseMs: 50_000 },
+    ]);
+    expect(daily).toBeUndefined();
+    expect(start).toMatchObject({ slot: "global_ai" });
+    const db = new DatabaseSync(file);
+    try {
+      expect(db.prepare("SELECT scope, COUNT(*) AS count FROM quota_events GROUP BY scope ORDER BY scope").all()).toEqual([
+        { scope: "autonomous_daily", count: 1 },
+        { scope: "autonomous_start", count: 1 },
+      ]);
+      expect(db.prepare("SELECT slot, lease_id, expires_at FROM quota_leases").get()).toMatchObject({ slot: "global_ai", lease_id: start!.id, expires_at: now + 50_000 });
+    } finally { db.close(); }
+  });
+  it("rolls back every policy when a later policy is exhausted", () => {
+    const start = { scope: "autonomous_start", subject: "alice", limit: 2, windowMs: 3_600_000 };
+    first.reserve(start);
+    first.reserve(start);
+    expect(() => first.reserveMany([
+      { scope: "autonomous_daily", subject: "alice", limit: 6, windowMs: 86_400_000 },
+      start,
+    ])).toThrow(QuotaExceeded);
+    const db = new DatabaseSync(file);
+    try {
+      expect(db.prepare("SELECT COUNT(*) AS count FROM quota_events WHERE scope = 'autonomous_daily'").get()).toMatchObject({ count: 0 });
+      expect(db.prepare("SELECT COUNT(*) AS count FROM quota_events WHERE scope = 'autonomous_start'").get()).toMatchObject({ count: 2 });
+    } finally { db.close(); }
+  });
   it("enforces global scan and AI slots, releases by lease ID, and expires stale leases after restart", () => {
     const scan = first.reserve(policy("alice", "global_scan"));
     expect(() => second.reserve(policy("bob", "global_scan"))).toThrow(QuotaExceeded);

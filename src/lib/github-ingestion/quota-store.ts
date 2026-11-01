@@ -33,22 +33,41 @@ export class SqliteQuotaStore {
     this.db.prepare("DELETE FROM provider_usage WHERE day < ?").run(Math.floor(now / DAY) - 2);
   }
   reserve(policy: QuotaPolicy): QuotaLease | undefined {
-    if (!Number.isSafeInteger(policy.limit) || policy.limit < 1 || !Number.isSafeInteger(policy.windowMs) || policy.windowMs < 1 || !/^[a-z_]{1,40}$/.test(policy.scope) || !policy.subject || policy.subject.length > 128) throw new Error("Invalid quota policy.");
+    return this.reserveMany([policy])[0];
+  }
+  reserveMany(policies: readonly QuotaPolicy[]): (QuotaLease | undefined)[] {
     const now = this.now();
     return this.transaction(() => {
+      if (!Array.isArray(policies) || policies.length === 0) throw new Error("At least one quota policy is required.");
+      for (const policy of policies) if (!Number.isSafeInteger(policy.limit) || policy.limit < 1 || !Number.isSafeInteger(policy.windowMs) || policy.windowMs < 1 || !/^[a-z_]{1,40}$/.test(policy.scope) || !policy.subject || policy.subject.length > 128) throw new Error("Invalid quota policy.");
       this.sweep(now);
-      if (policy.slot) {
-        const existing = this.db.prepare("SELECT expires_at FROM quota_leases WHERE slot = ?").get(policy.slot) as { expires_at: number } | undefined;
-        if (existing) throw new QuotaExceeded(Math.max(1, Math.ceil((existing.expires_at - now) / 1000)), `${policy.scope}_active`);
+      const eventCounts = new Map<string, number>();
+      const leaseExpirations = new Map<string, number>();
+      const leases: (QuotaLease | undefined)[] = [];
+      for (const policy of policies) {
+        const eventKey = JSON.stringify([policy.scope, policy.subject]);
+        if (policy.slot) {
+          const existing = this.db.prepare("SELECT expires_at FROM quota_leases WHERE slot = ?").get(policy.slot) as { expires_at: number } | undefined;
+          const expiration = existing?.expires_at ?? leaseExpirations.get(policy.slot);
+          if (expiration !== undefined) throw new QuotaExceeded(Math.max(1, Math.ceil((expiration - now) / 1000)), `${policy.scope}_active`);
+        }
+        const first = this.db.prepare("SELECT occurred_at FROM quota_events WHERE scope = ? AND subject = ? AND occurred_at > ? ORDER BY occurred_at LIMIT 1").get(policy.scope, policy.subject, now - policy.windowMs) as { occurred_at: number } | undefined;
+        const count = (this.db.prepare("SELECT COUNT(*) AS count FROM quota_events WHERE scope = ? AND subject = ? AND occurred_at > ?").get(policy.scope, policy.subject, now - policy.windowMs) as { count: number }).count;
+        const pendingCount = eventCounts.get(eventKey) ?? 0;
+        if (count + pendingCount >= policy.limit) throw new QuotaExceeded(Math.max(1, Math.ceil(((first?.occurred_at ?? now) + policy.windowMs - now) / 1000)), `${policy.scope}_rate`);
+        eventCounts.set(eventKey, pendingCount + 1);
+        if (!policy.slot) leases.push(undefined);
+        else {
+          const lease = { id: randomUUID(), slot: policy.slot };
+          leases.push(lease);
+          leaseExpirations.set(policy.slot, now + (policy.leaseMs ?? 90_000));
+        }
       }
-      const first = this.db.prepare("SELECT occurred_at FROM quota_events WHERE scope = ? AND subject = ? AND occurred_at > ? ORDER BY occurred_at LIMIT 1").get(policy.scope, policy.subject, now - policy.windowMs) as { occurred_at: number } | undefined;
-      const count = (this.db.prepare("SELECT COUNT(*) AS count FROM quota_events WHERE scope = ? AND subject = ? AND occurred_at > ?").get(policy.scope, policy.subject, now - policy.windowMs) as { count: number }).count;
-      if (count >= policy.limit) throw new QuotaExceeded(Math.max(1, Math.ceil(((first?.occurred_at ?? now) + policy.windowMs - now) / 1000)), `${policy.scope}_rate`);
-      this.db.prepare("INSERT INTO quota_events(scope,subject,occurred_at) VALUES(?,?,?)").run(policy.scope, policy.subject, now);
-      if (!policy.slot) return undefined;
-      const lease = { id: randomUUID(), slot: policy.slot };
-      this.db.prepare("INSERT INTO quota_leases(slot,lease_id,expires_at) VALUES(?,?,?)").run(lease.slot, lease.id, now + (policy.leaseMs ?? 90_000));
-      return lease;
+      for (const policy of policies) this.db.prepare("INSERT INTO quota_events(scope,subject,occurred_at) VALUES(?,?,?)").run(policy.scope, policy.subject, now);
+      leases.forEach((lease, index) => {
+        if (lease) this.db.prepare("INSERT INTO quota_leases(slot,lease_id,expires_at) VALUES(?,?,?)").run(lease.slot, lease.id, now + (policies[index].leaseMs ?? 90_000));
+      });
+      return leases;
     });
   }
   release(lease: QuotaLease | undefined) { if (lease) this.db.prepare("DELETE FROM quota_leases WHERE slot = ? AND lease_id = ?").run(lease.slot, lease.id); }
