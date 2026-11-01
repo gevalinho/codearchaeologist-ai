@@ -42,6 +42,7 @@ export type AngularUiRouterState = {
   templateUrl?: string;
   controller?: string;
   source: SourceRef;
+  stateNameSource?: SourceRef;
   templateSource?: SourceRef;
   controllerSource?: SourceRef;
 };

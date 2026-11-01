@@ -10,6 +10,7 @@ type PendingRoute = {
   target?: string;
   controller?: string;
   stateName?: string;
+  stateNameSource?: SourceRef;
   templateUrl?: string;
   templateSource?: SourceRef;
   controllerSource?: SourceRef;
@@ -190,6 +191,7 @@ const frontendRouteAdapters: FrontendRouteAdapter[] = [
           adapter: "angularjs",
           ...(routePath !== undefined ? { path: routePath } : {}),
           ...(stateName ? { stateName } : {}),
+          ...(stateName && args[0] ? { stateNameSource: location(args[0], path) } : {}),
           ...(target ? { target } : {}),
           ...(literal(controllerProperty) ? { controller: literal(controllerProperty) } : {}),
           ...(templateUrl ? { templateUrl, templateSource: location(templateProperty!, path) } : {}),
@@ -625,6 +627,7 @@ export function analyzeJavaScriptSource(path: string, content: string, fileId: s
       ...(isUiRouteTemplate(route.templateUrl) ? { templateUrl: route.templateUrl } : {}),
       ...(route.controller ? { controller: route.controller } : {}),
       source: route.ref,
+      ...(route.stateNameSource ? { stateNameSource: route.stateNameSource } : {}),
       ...(route.templateSource ? { templateSource: route.templateSource } : {}),
       ...(route.controllerSource ? { controllerSource: route.controllerSource } : {}),
     }];

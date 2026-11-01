@@ -107,7 +107,7 @@ describe("autonomous investigation", () => {
     const provider = new MockModelProvider([action("finish"), insufficient]);
     await runAutonomousInvestigation(graph, "public-github", "Investigate login", provider, new AbortController().signal, () => undefined);
     const input = JSON.parse(provider.requests[0].input) as { validActionExamples: ReturnType<typeof action>[] };
-    expect(input.validActionExamples.map(item => item.tool)).toEqual(["search_components", "trace_relationships", "inspect_rule_patterns", "find_feature_candidates", "check_coverage", "finish"]);
+    expect(input.validActionExamples.map(item => item.tool)).toEqual(["search_components", "trace_relationships", "trace_source_flow", "inspect_rule_patterns", "find_feature_candidates", "check_coverage", "finish"]);
     for (const example of input.validActionExamples.filter(item => item.tool !== "finish")) expect(() => parseInvestigationToolCall(example, graph)).not.toThrow();
     expect(provider.requests[0].schema).toMatchObject({ properties: { query: { description: expect.stringContaining("80 characters") }, componentId: { description: expect.stringContaining("500 characters") }, depth: { description: expect.stringContaining("1 or 2") } } });
     const invalid = [
@@ -183,7 +183,7 @@ describe("autonomous investigation", () => {
     const report = await runAutonomousInvestigation(graph, "public-github", "Investigate login", provider, new AbortController().signal, () => undefined);
     expect(report.actions.map(item => item.matchCount)).toEqual([0, 2]);
     expect(report.answer).toEqual(cited);
-    expect(provider.requests[0].instructions).toContain("All query terms must match the same component");
+    expect(provider.requests[0].instructions).toContain("All search_components terms must match the same component");
     expect(provider.requests[2].input).toContain('"remainingToolCalls":1');
     expect(provider.requests[2].input).toContain('"finalReportRequestedSeparately":true');
     expect(provider.requests[3].name).toBe("investigation_report_v1");

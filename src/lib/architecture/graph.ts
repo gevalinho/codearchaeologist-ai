@@ -50,9 +50,10 @@ export function parseGraph(input: string, byteLength = new TextEncoder().encode(
                 state.url !== undefined && !string(state.url, 500) ||
                 state.templateUrl !== undefined && !string(state.templateUrl, 500) ||
                 state.controller !== undefined && !string(state.controller, 200) ||
+                state.stateNameSource !== undefined && !validSource(state.stateNameSource) ||
                 state.templateSource !== undefined && !validSource(state.templateSource) ||
                 state.controllerSource !== undefined && !validSource(state.controllerSource)) return false;
-            const keys = Object.keys(state).sort().join();
+            const keys = Object.keys(state).filter(key => key !== "stateNameSource").sort().join();
             const allowed = new Set([
               "source,state",
               "source,state,url",

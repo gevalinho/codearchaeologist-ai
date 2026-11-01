@@ -2,8 +2,9 @@ import type { Graph, SourceRef } from "../archaeology/scanner";
 import type { PacketItem } from "./ai-evidence";
 import { safeAiLabel, safeAiSourceRef } from "./ai-evidence";
 import { discoverFeatures } from "./features";
+import { discoverSourceTraces, sourceTraceEvidence } from "./source-traces";
 
-export const investigationToolNames = ["search_components", "trace_relationships", "inspect_rule_patterns", "find_feature_candidates", "check_coverage"] as const;
+export const investigationToolNames = ["search_components", "trace_relationships", "trace_source_flow", "inspect_rule_patterns", "find_feature_candidates", "check_coverage"] as const;
 export type InvestigationToolName = typeof investigationToolNames[number];
 export type InvestigationToolArgs = { query: string; componentId: string; depth: number };
 export type InvestigationToolResult = { tool: InvestigationToolName; summary: string; items: Omit<PacketItem, "id">[]; matchCount?: number; coverage?: Graph["sourceCoverage"] | { analyzedFiles: number } };
@@ -33,6 +34,7 @@ export function parseInvestigationToolCall(value: unknown, graph: Graph): { tool
   if (!Number.isSafeInteger(action.depth)) reject("depth_type");
   if ((action.depth as number) < 0 || (action.depth as number) > 2) reject("depth_range");
   if (action.tool === "trace_relationships" && ((action.depth as number) < 1 || !graph.nodes.some(node => node.id === componentId))) reject("relationship_target");
+  if (action.tool === "trace_source_flow" && !query.trim()) reject("search_query_required");
   if (action.tool === "inspect_rule_patterns" && componentId && !graph.nodes.some(node => node.id === componentId)) reject("rule_target");
   if (action.tool === "search_components" && !query.trim()) reject("search_query_required");
   return { tool: action.tool as InvestigationToolName, args: { query, componentId, depth: action.depth as number } };
@@ -60,6 +62,12 @@ export function executeInvestigationTool(graph: Graph, tool: InvestigationToolNa
     const edges = graph.edges.filter(edge => seen.has(edge.from) && seen.has(edge.to));
     items = edges.slice(0, 12).map(edge => item("relationship", `${edge.kind}: ${edge.from} to ${edge.to}`, edge.certainty, edge.source));
     summary = `${edges.length} relationships within ${args.depth} graph hops; up to 12 references returned.`;
+  } else if (tool === "trace_source_flow") {
+    const traces = discoverSourceTraces(graph, args.query);
+    items = sourceTraceEvidence(graph, args.query);
+    summary = traces.length
+      ? `${traces.length} bounded source trace${traces.length === 1 ? "" : "s"}; up to ${items.length} phase-grouped evidence items returned. Inferred and unresolved links remain labeled.`
+      : "No recorded cross-stack source trace matched this query. This does not establish that no runtime relationship exists.";
   } else if (tool === "inspect_rule_patterns") {
     const rules = (graph.rules ?? []).filter(rule => !args.componentId || rule.ownerNodeId === args.componentId);
     items = rules.slice(0, 12).map(rule => item("rule", `${rule.kind} pattern in ${rule.ownerNodeId}`, "observed", rule.source));

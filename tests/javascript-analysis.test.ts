@@ -153,6 +153,7 @@ export function AppRoutes() { return <Routes><Route path="/linked" element={<Lan
       templateUrl: "index.php/page/adminresults",
       controller: "resultCtr",
       source: { path: "assets/js/routes.js", startLine: 2, endLine: 6 },
+      stateNameSource: { path: "assets/js/routes.js", startLine: 2, endLine: 2 },
       templateSource: { path: "assets/js/routes.js", startLine: 4, endLine: 4 },
       controllerSource: { path: "assets/js/routes.js", startLine: 5, endLine: 5 },
     })]);

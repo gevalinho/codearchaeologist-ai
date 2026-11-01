@@ -22,7 +22,8 @@ function validateText(text: string, field: RepositoryTextField, packet: Reposito
   if (/\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.|javascript:|data:|file:)/i.test(text) || /\]\s*\(/.test(text)) reject("unsafe_url");
   for (const match of text.matchAll(sourceLike)) {
     const reference = match[0];
-    if (match.index > 0 && /[/\\]/.test(text[match.index - 1]) || !packet.items.some(item => cited.has(item.id) && `${item.source.path}:${item.source.startLine}${item.source.endLine === item.source.startLine ? "" : `-${item.source.endLine}`}` === reference)) reject("source_reference");
+    const matchesReference = (source: { path: string; startLine: number; endLine: number }) => `${source.path}:${source.startLine}${source.endLine === source.startLine ? "" : `-${source.endLine}`}` === reference;
+    if (match.index > 0 && /[/\\]/.test(text[match.index - 1]) || !packet.items.some(item => cited.has(item.id) && [item.source, ...(item.supportingSources ?? [])].some(matchesReference))) reject("source_reference");
   }
 }
 export const repositoryChatSchema = { type: "object", additionalProperties: false, required: ["schemaVersion", "status", "answer", "evidenceIds", "uncertainty"], properties: { schemaVersion: { type: "string", enum: ["1.0.0"] }, status: { type: "string", enum: ["observed-structure", "inference", "suggestion", "insufficient-evidence"] }, answer: { type: "string", description: "Use exact candidate titles from the packet when naming candidates. Do not claim unsupported behavior." }, evidenceIds: { type: "array", description: "For every named candidate, include that candidate's exact anchor evidence ID. Cite at most four distinct packet item IDs.", maxItems: 4, uniqueItems: true, items: { type: "string" } }, uncertainty: { type: "string" } } };

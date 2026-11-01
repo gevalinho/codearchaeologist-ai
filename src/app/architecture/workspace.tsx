@@ -9,7 +9,12 @@ import {
   useState,
 } from "react";
 import Link from "next/link";
-import type { Edge, Graph, Node } from "../../lib/archaeology/scanner";
+import type {
+  Edge,
+  Graph,
+  Node,
+  SourceRef,
+} from "../../lib/archaeology/scanner";
 import {
   filterNodes,
   indexGraph,
@@ -40,6 +45,7 @@ import {
   createEvidencePacket,
   type EvidenceOrigin,
 } from "../../lib/architecture/ai-evidence";
+import { resolveEvidenceSelection } from "../../lib/architecture/evidence-navigation";
 import { createRepositoryEvidencePacket } from "../../lib/architecture/ai-repository-evidence";
 import {
   initialPreviewDrawerState,
@@ -71,6 +77,7 @@ import LocalScanPanel, {
   type LocalScanPhase,
 } from "./local-scan-panel";
 import BusinessRulesExplorer from "./business-rules-explorer";
+import SourceTraceExplorer from "./source-trace-explorer";
 import GitHubScanProgress, {
   appendObservedPhase,
 } from "./github-scan-progress";
@@ -101,6 +108,8 @@ const kinds = [
   "factory",
   "table",
   "endpoint",
+  "http-call",
+  "route",
   "branch",
 ];
 const colors: Record<string, string> = {
@@ -142,15 +151,17 @@ export default function ArchitectureWorkspace() {
       id: string;
     } | null>(null),
     [featured, setFeatured] = useState(false);
+  const [focusedEvidenceRef, setFocusedEvidenceRef] =
+    useState<SourceRef | null>(null);
   const [selectedFeatureId, setSelectedFeatureId] =
     useState("feature:promotion");
   const [featureQuery, setFeatureQuery] = useState("");
   const [artifactVersion, setArtifactVersion] = useState(0);
   const [section, setSection] = useState<WorkspaceSection>("repository");
   const [assistantOpen, setAssistantOpen] = useState(false);
-  const [workflowView, setWorkflowView] = useState<"features" | "rules">(
-    "features",
-  );
+  const [workflowView, setWorkflowView] = useState<
+    "features" | "rules" | "traces"
+  >("features");
   const [featureAiActivation, setFeatureAiActivation] = useState(0);
   const [architectureView, setArchitectureView] = useState<"map" | "modules">(
     "map",
@@ -432,6 +443,7 @@ export default function ArchitectureWorkspace() {
     setSourceJobId(jobId);
     setFocus([]);
     setSelected(null);
+    setFocusedEvidenceRef(null);
     setFeatured(false);
     setSelectedFeatureId("feature:promotion");
     setFeatureQuery("");
@@ -743,34 +755,34 @@ export default function ArchitectureWorkspace() {
   }
   function selectNode(node: Node) {
     setSelected({ type: "node", id: node.id });
+    setFocusedEvidenceRef(null);
     setFocus([node.id]);
     setFeatured(false);
+  }
+  function selectEdge(edge: Edge) {
+    setSelected({ type: "edge", id: edge.id });
+    setFocusedEvidenceRef(null);
   }
   function focusFeatureNode(node: Node) {
     selectNode(node);
     setSection("evidence");
   }
   function focusFeatureEdge(edge: Edge) {
-    setSelected({ type: "edge", id: edge.id });
+    selectEdge(edge);
     setFocus([edge.from, edge.to]);
     setSection("evidence");
   }
-  function focusEvidenceRef(ref: {
-    path: string;
-    startLine: number;
-    endLine: number;
-  }) {
-    const same = (item: { path: string; startLine: number; endLine: number }) =>
-      item.path === ref.path &&
-      item.startLine === ref.startLine &&
-      item.endLine === ref.endLine;
-    const owner = graph?.rules?.find((rule) => same(rule.source));
-    const node = owner
-      ? graph?.nodes.find((item) => item.id === owner.ownerNodeId)
-      : graph?.nodes.find((item) => same(item.source));
-    const edge = graph?.edges.find((item) => same(item.source));
-    if (node) selectNode(node);
-    else if (edge) setSelected({ type: "edge", id: edge.id });
+  function focusEvidenceRef(ref: SourceRef) {
+    const selection = resolveEvidenceSelection(graph, ref);
+    setFocusedEvidenceRef(ref);
+    setSelected(selection);
+    if (selection?.type === "node") {
+      setFocus([selection.id]);
+      setFeatured(false);
+    } else if (!selection) {
+      setFocus([]);
+      setFeatured(false);
+    }
     setSection("evidence");
   }
   function selectFeature(feature: FeatureInvestigation) {
@@ -787,6 +799,7 @@ export default function ArchitectureWorkspace() {
         .map((component) => component.node.id),
     );
     setSelected(null);
+    setFocusedEvidenceRef(null);
     setDepth(1);
     setDirection("both");
   }
@@ -801,6 +814,7 @@ export default function ArchitectureWorkspace() {
     setFocus(ids.slice(0, 36));
     setDepth(0);
     setSelected(null);
+    setFocusedEvidenceRef(null);
     setFeatured(false);
     setArchitectureView("map");
     setSection("architecture");
@@ -1361,19 +1375,33 @@ export default function ArchitectureWorkspace() {
                 >
                   Business rules
                 </button>
+                <button
+                  aria-current={workflowView === "traces" ? "page" : undefined}
+                  onClick={() => setWorkflowView("traces")}
+                >
+                  Source traces
+                </button>
               </div>
-              {graph && features.length === 0 && (
-                <div className="arch-no-features" role="status">
-                  No feature candidates were found in this snapshot. You can
-                  still search components and inspect source references in the
-                  architecture graph.
-                </div>
-              )}
+              {graph &&
+                workflowView === "features" &&
+                features.length === 0 && (
+                  <div className="arch-no-features" role="status">
+                    No feature candidates were found in this snapshot. You can
+                    still search components and inspect source references in the
+                    architecture graph.
+                  </div>
+                )}
               {graph && workflowView === "rules" && (
                 <BusinessRulesExplorer
                   key={workspacePanelKey("business-rules", artifactVersion)}
                   graph={graph}
                   onSelectNode={focusFeatureNode}
+                />
+              )}
+              {graph && workflowView === "traces" && (
+                <SourceTraceExplorer
+                  graph={graph}
+                  onFocusEvidence={focusEvidenceRef}
                 />
               )}
               {graph &&
@@ -1775,21 +1803,13 @@ export default function ArchitectureWorkspace() {
                                     <g
                                       key={edge.id}
                                       data-graph-interactive
-                                      onClick={() =>
-                                        setSelected({
-                                          type: "edge",
-                                          id: edge.id,
-                                        })
-                                      }
+                                      onClick={() => selectEdge(edge)}
                                       tabIndex={0}
                                       role="button"
                                       aria-label={`${edge.kind}: ${index?.nodes.get(edge.from)?.name} to ${index?.nodes.get(edge.to)?.name}`}
                                       onKeyDown={(event) => {
                                         if (event.key === "Enter")
-                                          setSelected({
-                                            type: "edge",
-                                            id: edge.id,
-                                          });
+                                          selectEdge(edge);
                                       }}
                                     >
                                       <line
@@ -1981,9 +2001,7 @@ export default function ArchitectureWorkspace() {
                               {incoming.slice(0, 20).map((edge) => (
                                 <button
                                   key={edge.id}
-                                  onClick={() =>
-                                    setSelected({ type: "edge", id: edge.id })
-                                  }
+                                  onClick={() => selectEdge(edge)}
                                 >
                                   {index?.nodes.get(edge.from)?.name}{" "}
                                   <small>→ {edge.kind}</small>
@@ -1993,9 +2011,7 @@ export default function ArchitectureWorkspace() {
                               {outgoing.slice(0, 20).map((edge) => (
                                 <button
                                   key={edge.id}
-                                  onClick={() =>
-                                    setSelected({ type: "edge", id: edge.id })
-                                  }
+                                  onClick={() => selectEdge(edge)}
                                 >
                                   {index?.nodes.get(edge.to)?.name}{" "}
                                   <small>← {edge.kind}</small>
@@ -2042,6 +2058,24 @@ export default function ArchitectureWorkspace() {
                       Browse component inventory →
                     </button>
                   </div>
+                  {/* <SourceTraceExplorer
+                    graph={graph}
+                    onFocusEvidence={focusEvidenceRef}
+                  /> */}
+                  {focusedEvidenceRef && (
+                    <div className="workspace-evidence-card">
+                      <span className="arch-tag">REQUESTED SOURCE</span>
+                      <h3>{focusedEvidenceRef.path}</h3>
+                      <div className="arch-source">
+                        <small>EXACT CITATION</small>
+                        <code>{sourceReference(focusedEvidenceRef)}</code>
+                      </div>
+                    </div>
+                  )}
+                  <SourceTraceExplorer
+                    graph={graph}
+                    onFocusEvidence={focusEvidenceRef}
+                  />
                   {activeNode || activeEdge ? (
                     <div className="workspace-evidence-card">
                       <span className="arch-tag">
@@ -2099,9 +2133,7 @@ export default function ArchitectureWorkspace() {
                             {incoming.map((edge) => (
                               <button
                                 key={edge.id}
-                                onClick={() =>
-                                  setSelected({ type: "edge", id: edge.id })
-                                }
+                                onClick={() => selectEdge(edge)}
                               >
                                 {index?.nodes.get(edge.from)?.name} →{" "}
                                 {edge.kind} · {edge.certainty} ·{" "}
@@ -2116,9 +2148,7 @@ export default function ArchitectureWorkspace() {
                             {outgoing.map((edge) => (
                               <button
                                 key={edge.id}
-                                onClick={() =>
-                                  setSelected({ type: "edge", id: edge.id })
-                                }
+                                onClick={() => selectEdge(edge)}
                               >
                                 {index?.nodes.get(edge.to)?.name} ← {edge.kind}{" "}
                                 · {edge.certainty} ·{" "}
@@ -2131,10 +2161,15 @@ export default function ArchitectureWorkspace() {
                     </div>
                   ) : (
                     <div className="workspace-empty">
-                      <h3>No component selected</h3>
+                      <h3>
+                        {focusedEvidenceRef
+                          ? "No graph entity matches this citation"
+                          : "No component selected"}
+                      </h3>
                       <p>
-                        Source references appear here after you select a graph
-                        component, rule owner, or relationship.
+                        {focusedEvidenceRef
+                          ? "The requested source reference is shown above; no component or relationship was substituted."
+                          : "Source references appear here after you select a graph component, rule owner, or relationship."}
                       </p>
                     </div>
                   )}
