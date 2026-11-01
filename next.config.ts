@@ -1,4 +1,11 @@
 import type { NextConfig } from "next";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const phpParserBrowserLoader = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "scripts/loaders/php-parser-browser-arch-loader.cjs",
+);
 
 const nextConfig: NextConfig = {
   /* config options here */
@@ -34,6 +41,18 @@ const nextConfig: NextConfig = {
   },
   turbopack: {
     rules: {
+      "*.js": [
+        {
+          condition: {
+            all: [
+              "browser",
+              { path: /node_modules\/php-parser\/dist\/php-parser\.js$/ },
+            ],
+          },
+          loaders: [phpParserBrowserLoader],
+          as: "*.js",
+        },
+      ],
       "*.css": {
         loaders: ["@tailwindcss/turbopack"],
         as: "*.css",

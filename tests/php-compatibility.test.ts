@@ -77,7 +77,7 @@ describe("PHP compatibility smoke fixtures", () => {
   });
   it("selects application PHP across common layouts while excluding sensitive and dependency paths", () => {
     for (const path of ["index.php", "application/controllers/Orders.php", "app/Http/Controllers/Orders.php", "src/Order.php", "wp-content/plugins/example/example.php"]) expect(allowedSource(path)).toBe(true);
-    for (const path of ["vendor/Foo.php", "system/Core.php", "app/config/database.php", "wp-content/plugins/example/.env.php", "routes/web.php", "wp-includes/core.php"]) expect(allowedSource(path)).toBe(false);
+    for (const path of ["vendor/Foo.php", "system/Core.php", "app/config/database.php", "wp-content/plugins/example/.env.php", "routes/custom.php", "wp-includes/core.php"]) expect(allowedSource(path)).toBe(false);
   });
   it("records conservative PHP 7/8 declarations and rule patterns without claiming route or hook edges", async () => {
     const plain = (await scanSelectedDirectory(examples.plain)).graph;

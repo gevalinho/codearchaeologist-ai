@@ -2,7 +2,9 @@
   "name": "codearchaeologist-ai",
   "version": "0.1.0",
   "private": true,
-  "engines": { "node": ">=24.15.0 <25" },
+  "engines": {
+    "node": ">=24.15.0 <25"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -18,7 +20,9 @@
     "archaeology": "node --experimental-transform-types --import ./scripts/register-types.mjs scripts/scan-archaeology.ts"
   },
   "dependencies": {
+    "@babel/parser": "7.29.11",
     "next": "16.4.3",
+    "php-parser": "3.7.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "server-only": "^0.0.1"

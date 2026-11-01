@@ -10,11 +10,11 @@ async function fixture() {
   const base = await mkdtemp(path.join(tmpdir(), "ingestion-")); created.push(base);
   const repo = path.join(base, "demo-repository");
   await mkdir(path.join(repo, "application/controllers"), { recursive: true });
-  await mkdir(path.join(repo, "assets/js"), { recursive: true });
+  await mkdir(path.join(repo, "assets/css"), { recursive: true });
   await mkdir(path.join(repo, "application/vendor"), { recursive: true });
   await writeFile(path.join(repo, "application/controllers/Promotion.php"), "<?php\nclass Promotion { public function putPromotion() {} }\n");
   await writeFile(path.join(repo, "application/controllers/credentials.php"), "private");
-  await writeFile(path.join(repo, "assets/js/demo.js"), "ignored");
+  await writeFile(path.join(repo, "assets/css/demo.js"), "ignored");
   await writeFile(path.join(repo, "application/vendor/Hidden.php"), "<?php class Hidden {} ");
   await symlink(path.join(repo, "application/controllers/Promotion.php"), path.join(repo, "application/controllers/Linked.php"));
   return { base, repo, out: path.join(base, "output") };

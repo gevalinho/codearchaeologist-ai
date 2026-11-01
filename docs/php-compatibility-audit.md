@@ -1,6 +1,8 @@
 # PHP compatibility audit — 29 October 2026
 
-This is a bounded fixture audit, not a claim that arbitrary PHP projects are understood. Fixtures in `tests/php-compatibility.test.ts` are minimal representative snippets modeled on official documentation; no framework dependencies were downloaded or executed. Counts below are from the browser scanner. Every fixture produced zero scanner warnings and zero *reported* parser failures because the scanner is a line-pattern extractor and has no PHP parser or syntax-error reporting.
+The fixture findings below record the line-pattern scanner at audit time. The PHP parser foundation added afterward is summarized in [Repository intelligence engine](./archaeology.md); it improves syntax diagnostics and symbol indexing but does not yet change the framework route or graph relationships described here.
+
+This is a bounded fixture audit, not a claim that arbitrary PHP projects are understood. Fixtures in `tests/php-compatibility.test.ts` are minimal representative snippets modeled on official documentation; no framework dependencies were downloaded or executed. Counts below are from the browser scanner. At audit time, every fixture produced zero scanner warnings and zero *reported* parser failures because the scanner was a line-pattern extractor and had no PHP parser or syntax-error reporting.
 
 | Fixture | Discovered / eligible / processed | Excluded paths and reason | Nodes / edges / rules | Source-supported relationships | Missing or misleading relationships |
 | --- | ---: | --- | ---: | --- | --- |
