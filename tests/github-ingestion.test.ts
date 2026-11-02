@@ -338,8 +338,8 @@ describe("analysis job lifecycle", () => {
   it("bounds new jobs and expires retained artifacts", async () => {
     let now = Date.now();
     const manager = new GitHubJobManager(dependencies({ now: () => now }));
-    for (let i = 0; i < 2; i++) { const job = manager.create(repoUrl); await manager.wait(job.id); }
-    expect(() => manager.create(repoUrl)).toThrow(/quota exceeded/);
+    for (let i = 0; i < 3; i++) { const job = manager.create(repoUrl); await manager.wait(job.id); }
+    expect(() => manager.create(repoUrl)).toThrow(/capacity is full/);
     now += 60 * 60_000 + 1;
     const next = manager.create(repoUrl); await manager.wait(next.id);
     expect(manager.get(next.id)?.phase).toBe("ready");

@@ -22,7 +22,7 @@ import type { UserSession } from "./session";
 import { GITHUB_RESPONSE_TOO_LARGE_MESSAGE } from "./network";
 import { SqliteJobStore, type JobOwner } from "./job-store";
 import { privateDirectory } from "./state-db";
-import { SqliteQuotaStore, type QuotaLease } from "./quota-store";
+import { SCAN_START_LIMIT, SCAN_START_WINDOW_MS, SqliteQuotaStore, type QuotaLease } from "./quota-store";
 import { SqliteDispatchStore, type AcquiredSource } from "./dispatch-store";
 import { readAcquiredSnapshot } from "./acquired-snapshot";
 import { loadProductionWorkerHandoff } from "./production-handoff";
@@ -421,8 +421,8 @@ export class GitHubJobManager {
     const quotaLease = this.quota.reserve({
       scope: "scan_start",
       subject: privateContext?.user.id ?? publicUser?.id ?? "legacy-unowned",
-      limit: 2,
-      windowMs: 3_600_000,
+      limit: SCAN_START_LIMIT,
+      windowMs: SCAN_START_WINDOW_MS,
       slot: "global_scan",
       leaseMs: 95_000,
     });

@@ -9,6 +9,8 @@ export class QuotaExceeded extends Error {
 
 export type QuotaPolicy = { scope: string; subject: string; limit: number; windowMs: number; slot?: string; leaseMs?: number };
 export type QuotaLease = { id: string; slot: string };
+export const SCAN_START_LIMIT = 5;
+export const SCAN_START_WINDOW_MS = 3_600_000;
 const DAY = 86_400_000;
 const limitEnv = (name: string, fallback: number) => {
   const raw = process.env[name];
@@ -71,6 +73,15 @@ export class SqliteQuotaStore {
     });
   }
   release(lease: QuotaLease | undefined) { if (lease) this.db.prepare("DELETE FROM quota_leases WHERE slot = ? AND lease_id = ?").run(lease.slot, lease.id); }
+  /** Read-only rolling-window status using the exact boundary semantics of reserve(). */
+  scanStartStatus(subject: string, limit: number, windowMs: number): { limit: number; used: number; remaining: number; nextAvailableAt: number | null; now: number } {
+    if (!subject || subject.length > 128 || !Number.isSafeInteger(limit) || limit < 1 || !Number.isSafeInteger(windowMs) || windowMs < 1) throw new Error("Invalid quota policy.");
+    const now = this.now();
+    const first = this.db.prepare("SELECT occurred_at FROM quota_events WHERE scope = ? AND subject = ? AND occurred_at > ? ORDER BY occurred_at LIMIT 1").get("scan_start", subject, now - windowMs) as { occurred_at: number } | undefined;
+    const count = (this.db.prepare("SELECT COUNT(*) AS count FROM quota_events WHERE scope = ? AND subject = ? AND occurred_at > ?").get("scan_start", subject, now - windowMs) as { count: number }).count;
+    const used = Math.min(count, limit);
+    return { limit, used, remaining: Math.max(0, limit - used), nextAvailableAt: count >= limit ? (first?.occurred_at ?? now) + windowMs : null, now };
+  }
   renew(lease: QuotaLease, leaseMs: number): boolean {
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 300_000) throw new Error("Invalid lease duration.");
     const now = this.now();

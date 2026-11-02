@@ -95,6 +95,10 @@ import RelationshipEvidence from "./relationship-evidence";
 import GitHubScanProgress, {
   appendObservedPhase,
 } from "./github-scan-progress";
+import ScanQuotaIndicator, {
+  QUOTA_REFRESH_EVENT,
+  formatQuotaCountdown,
+} from "./scan-quota-indicator";
 import {
   WorkspaceNavigation,
   workspaceSections,
@@ -624,7 +628,24 @@ export default function ArchitectureWorkspace() {
       cache: "no-store",
     });
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
+      const body = (await response.json().catch(() => ({}))) as {
+        error?: unknown;
+        rule?: unknown;
+        retryAfter?: unknown;
+      };
+      if (response.status === 429 && typeof body.error === "string") {
+        const wait = Number.isSafeInteger(body.retryAfter) && (body.retryAfter as number) > 0
+          ? formatQuotaCountdown((body.retryAfter as number) * 1000)
+          : null;
+        if (body.rule === "scan_start_rate")
+          throw new Error(
+            wait
+              ? `Scan allowance used. Next scan available in ${wait}. Earlier scans leave the hourly window automatically — retry when the countdown ends.`
+              : body.error,
+          );
+        if (body.rule === "scan_start_active")
+          throw new Error("Another scan is currently running. Wait for it to finish, then retry.");
+      }
       throw new Error(
         typeof body.error === "string"
           ? body.error
@@ -750,6 +771,7 @@ export default function ArchitectureWorkspace() {
     } finally {
       if (githubAbort.current === controller) githubAbort.current = null;
       setGithubSubmitting(false);
+      window.dispatchEvent(new Event(QUOTA_REFRESH_EVENT));
     }
   }
   async function cancelGitHubAnalysis() {
@@ -1141,6 +1163,7 @@ export default function ArchitectureWorkspace() {
                       >
                         Analyze selected repository ↗
                       </button>
+                      <ScanQuotaIndicator />
                       {githubConnection.repositories.length === 0 && (
                         <p>
                           No authorized repositories are available. Install the
@@ -1194,6 +1217,7 @@ export default function ArchitectureWorkspace() {
                     {!githubConnection && (
                       <p>Connect GitHub before starting a public scan.</p>
                     )}
+                    {githubConnection && <ScanQuotaIndicator />}
                   </form>
                 </section>
               )}
