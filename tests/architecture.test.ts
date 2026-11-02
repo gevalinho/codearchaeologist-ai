@@ -29,6 +29,34 @@ describe("architecture artifact", () => {
     expect(neighborhood(graph, ["table:classes"], 1).edges).toHaveLength(0);
     expect([...layout(graph.nodes)]).toEqual([...layout([...graph.nodes].reverse())]);
   });
+  it("filters likely vendor neighbors without removing explicit navigation seeds", () => {
+    const vendor: Graph["nodes"][number] = {
+      ...graph.nodes[0],
+      id: "file:angular",
+      kind: "file",
+      name: "assets/js/angular.js",
+      source: { path: "assets/js/angular.js", startLine: 1, endLine: 1 },
+    };
+    const withVendor: Graph = {
+      ...graph,
+      nodes: [...graph.nodes, vendor],
+      edges: [...graph.edges, {
+        id: "vendor-edge",
+        from: graph.nodes[0].id,
+        to: vendor.id,
+        kind: "declares",
+        certainty: "observed",
+        method: "fixture",
+        source: vendor.source,
+      }],
+    };
+    const allowed = new Set(graph.nodes.map(node => node.id));
+
+    expect(neighborhood(withVendor, [graph.nodes[0].id], 1, "both", allowed).nodes)
+      .not.toContainEqual(vendor);
+    expect(neighborhood(withVendor, [vendor.id], 0, "both", allowed).nodes)
+      .toContainEqual(vendor);
+  });
   it("selects only present promotion components and reports missing ones", () => {
     const result = promotionInvestigation(graph);
     expect(result.matches.map(item => item.term)).toContain("promotionCtr");

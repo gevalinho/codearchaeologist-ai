@@ -10,8 +10,11 @@ export type EvidencePacket = { schemaVersion: "1.0.0"; featureId: string; featur
 const SENSITIVE = /(?:^|[/_.-])(?:\.env|secrets?|tokens?|credentials?|passwords?|private[_-]?keys?|api[_-]?keys?)(?:$|[/_.-])/i;
 const safeLabel = (value: unknown, max = 160): value is string => typeof value === "string" && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f<>]/.test(value) && !SENSITIVE.test(value);
 export const safeAiLabel = (value: unknown, max = 160): value is string => safeLabel(value, max);
+export const safeAiSourcePath = (value: unknown): value is string =>
+  safePath(value) &&
+  (!SENSITIVE.test(value) || /^(?:application\/controllers?|app\/Http\/Controllers)\/Password\.php$/.test(value));
 export const safeAiSourceRef = (value: unknown): value is SourceRef => validRef(value);
-const validRef = (value: unknown): value is SourceRef => !!value && typeof value === "object" && safePath((value as SourceRef).path) && (!SENSITIVE.test((value as SourceRef).path) || /^(?:application\/controllers?|app\/Http\/Controllers)\/Password\.php$/.test((value as SourceRef).path)) && Number.isSafeInteger((value as SourceRef).startLine) && Number.isSafeInteger((value as SourceRef).endLine) && (value as SourceRef).startLine > 0 && (value as SourceRef).endLine >= (value as SourceRef).startLine && (value as SourceRef).endLine - (value as SourceRef).startLine <= 20;
+const validRef = (value: unknown): value is SourceRef => !!value && typeof value === "object" && safeAiSourcePath((value as SourceRef).path) && Number.isSafeInteger((value as SourceRef).startLine) && Number.isSafeInteger((value as SourceRef).endLine) && (value as SourceRef).startLine > 0 && (value as SourceRef).endLine >= (value as SourceRef).startLine && (value as SourceRef).endLine - (value as SourceRef).startLine <= 20;
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const exact = (value: Record<string, unknown>, names: string[]) => Object.keys(value).length === names.length && names.every(name => name in value);
 const origins: EvidenceOrigin[] = ["browser-local", "public-github", "private-github", "imported-graph"];

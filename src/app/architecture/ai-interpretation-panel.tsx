@@ -5,6 +5,7 @@ import type { SourceRef } from "../../lib/archaeology/scanner";
 import type { EvidencePacket } from "../../lib/architecture/ai-evidence";
 import { parseAiResponseEnvelope, type AiClaim, type AiInterpretation } from "../../lib/architecture/ai-interpretation";
 import { parseChatAnswer, type ChatAnswer, type ChatTurn } from "../../lib/architecture/ai-chat";
+import { isAiJsonRecord, readAiJsonResponse, serializeBoundedChatRequest } from "../../lib/architecture/ai-http-response";
 import { sourceReference } from "../../lib/architecture/graph";
 
 export default function AiInterpretationPanel({ packet, artifactId, onFocusEvidence, onOpenPreview, previewAvailable }: { packet: EvidencePacket | null; artifactId?: string | null; onFocusEvidence: (ref: SourceRef) => void; onOpenPreview: () => void; previewAvailable: boolean }) {
@@ -18,13 +19,14 @@ export default function AiInterpretationPanel({ packet, artifactId, onFocusEvide
     setError(""); setResult(null); setHistory([]); setChatAnswers([]); setLoading(true);
     try {
       const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true, ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
-      const body = await response.json();
+      const body = await readAiJsonResponse(response);
       if (!response.ok) {
-        const category = typeof body.diagnostic?.category === "string" && /^(?:provider_(?:config|http|timeout|malformed|network|incomplete)|invalid_interpretation)$/.test(body.diagnostic.category) ? body.diagnostic.category.replaceAll("_", " ") : "";
-        const upstream = Number.isInteger(body.diagnostic?.upstreamStatus) && body.diagnostic.upstreamStatus >= 400 && body.diagnostic.upstreamStatus <= 599 ? ` · upstream HTTP ${body.diagnostic.upstreamStatus}` : "";
-        const finish = ["stop", "length", "content_filter", "tool_calls"].includes(body.diagnostic?.finishReason) ? ` · finish ${body.diagnostic.finishReason}` : "";
-        const output = Number.isSafeInteger(body.diagnostic?.outputTokens) && body.diagnostic.outputTokens >= 0 ? ` · output ${body.diagnostic.outputTokens} tokens` : "";
-        const reasoning = Number.isSafeInteger(body.diagnostic?.reasoningTokens) && body.diagnostic.reasoningTokens >= 0 ? ` · reasoning ${body.diagnostic.reasoningTokens} tokens` : "";
+        const diagnostic = isAiJsonRecord(body.diagnostic) ? body.diagnostic : {};
+        const category = typeof diagnostic.category === "string" && /^(?:provider_(?:config|http|timeout|malformed|network|incomplete)|invalid_interpretation)$/.test(diagnostic.category) ? diagnostic.category.replaceAll("_", " ") : "";
+        const upstream = typeof diagnostic.upstreamStatus === "number" && Number.isInteger(diagnostic.upstreamStatus) && diagnostic.upstreamStatus >= 400 && diagnostic.upstreamStatus <= 599 ? ` · upstream HTTP ${diagnostic.upstreamStatus}` : "";
+        const finish = typeof diagnostic.finishReason === "string" && ["stop", "length", "content_filter", "tool_calls"].includes(diagnostic.finishReason) ? ` · finish ${diagnostic.finishReason}` : "";
+        const output = typeof diagnostic.outputTokens === "number" && Number.isSafeInteger(diagnostic.outputTokens) && diagnostic.outputTokens >= 0 ? ` · output ${diagnostic.outputTokens} tokens` : "";
+        const reasoning = typeof diagnostic.reasoningTokens === "number" && Number.isSafeInteger(diagnostic.reasoningTokens) && diagnostic.reasoningTokens >= 0 ? ` · reasoning ${diagnostic.reasoningTokens} tokens` : "";
         throw new Error(`${typeof body.error === "string" ? body.error : "AI interpretation failed."}${category ? ` (${category}${upstream}${finish}${output}${reasoning})` : ""}`);
       }
       const parsed = parseAiResponseEnvelope(body, packet);
@@ -37,8 +39,8 @@ export default function AiInterpretationPanel({ packet, artifactId, onFocusEvide
     const asked = question.trim();
     const controller = new AbortController(); pending.current = controller; setLoading(true); setError("");
     try {
-      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true, question: asked, history: history.slice(-6), ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
-      const body = await response.json();
+      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: serializeBoundedChatRequest({ packet, consent: true, question: asked, history, ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
+      const body = await readAiJsonResponse(response);
       if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "AI answer failed. Retry shortly.");
       if (body.featureId !== packet.featureId || body.snapshotId !== packet.snapshotId) throw new Error("AI answer belongs to a different investigation.");
       const answer = parseChatAnswer(body.answer, packet);

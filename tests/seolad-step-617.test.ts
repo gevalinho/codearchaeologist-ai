@@ -4,6 +4,7 @@ import { scanRepository } from "../src/lib/archaeology/scanner";
 import { allowedSource } from "../src/lib/archaeology/selection";
 import { graphFromSources } from "../src/lib/archaeology/scanner-core";
 import { parseGraph } from "../src/lib/architecture/graph";
+import { analyzeArchitectureHealth } from "../src/lib/architecture/architecture-health";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -62,6 +63,7 @@ describe("Step 617 Seolad evidence-gap regressions", () => {
       source("application/models/Get_model.php", phpModel),
     ];
     const graph = await graphFromSources(sources, []);
+    expect(analyzeArchitectureHealth(graph).findings).toEqual([]);
     const endpoint = graph.nodes.find(node => node.kind === "endpoint" && node.name === "index.php/gett/getresultinput")!;
     const route = graph.nodes.find(node => node.kind === "route" && node.name.includes("gett/(:any)"))!;
     const getData = graph.nodes.find(node => node.kind === "method" && node.name.endsWith("Getdatactrl.php#getData"))!;

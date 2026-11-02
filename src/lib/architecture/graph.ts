@@ -195,7 +195,7 @@ export function indexGraph(graph: Graph) {
   }
   return { nodes, incoming, outgoing };
 }
-export function neighborhood(graph: Graph, seeds: string[], depth = 1, direction: "both" | "incoming" | "outgoing" = "both") {
+export function neighborhood(graph: Graph, seeds: string[], depth = 1, direction: "both" | "incoming" | "outgoing" = "both", allowedNodeIds?: ReadonlySet<string>) {
   const index = indexGraph(graph), seen = new Set(seeds.filter(id => index.nodes.has(id))), queue = [...seen].map(id => ({ id, distance: 0 }));
   for (let i = 0; i < queue.length && seen.size < MAX_VISIBLE_NODES; i++) {
     const current = queue[i];
@@ -203,6 +203,7 @@ export function neighborhood(graph: Graph, seeds: string[], depth = 1, direction
     const edges = [...(direction === "outgoing" ? [] : index.incoming.get(current.id) ?? []), ...(direction === "incoming" ? [] : index.outgoing.get(current.id) ?? [])].sort((a, b) => a.id.localeCompare(b.id));
     for (const edge of edges) {
       const next = edge.from === current.id ? edge.to : edge.from;
+      if (allowedNodeIds && !allowedNodeIds.has(next)) continue;
       if (!seen.has(next) && seen.size < MAX_VISIBLE_NODES) { seen.add(next); queue.push({ id: next, distance: current.distance + 1 }); }
     }
   }

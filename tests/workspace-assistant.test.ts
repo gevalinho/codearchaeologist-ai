@@ -37,6 +37,28 @@ describe("workspace AI assistant", () => {
     expect(await response.json()).toMatchObject({ answer });
   });
 
+  it("keeps the assistant's selected-feature chat mode on the existing validated endpoint", async () => {
+    const answer = { schemaVersion: "1.0.0", answer: "A login component is represented in the evidence.", evidenceIds: [featurePacket.items[0].id], uncertainty: "Runtime behavior is unverified." };
+    const provider = new MockModelProvider([answer]);
+    const handle = createAiInterpretationHandler({
+      enabled: true,
+      origin: "https://app.example",
+      developmentAccess: true,
+      createProvider: () => provider,
+      privateAuthorized: () => false,
+      now: () => 20_000,
+    });
+    const response = await handle(request({
+      packet: featurePacket,
+      consent: true,
+      question: "What is shown?",
+      history: [],
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ featureId: featurePacket.featureId, answer });
+    expect(provider.requests[0].name).toBe("feature_chat_v1");
+  });
+
   it("invalidates consent for changed packets and separates feature context", () => {
     const repositoryId = assistantContextId("repository", repositoryPacket)!;
     const featureId = assistantContextId("feature", featurePacket)!;

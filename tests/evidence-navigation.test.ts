@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { Edge, Graph, Node, SourceRef } from "../src/lib/archaeology/scanner";
-import { resolveEvidenceSelection } from "../src/lib/architecture/evidence-navigation";
+import {
+  initialGraphNavigationState,
+  reduceGraphNavigation,
+  resolveEvidenceSelection,
+} from "../src/lib/architecture/evidence-navigation";
 
 const source = (startLine: number, endLine: number): SourceRef => ({
   path: "assets/js/angular.main.js",
@@ -70,5 +74,77 @@ describe("source-reference navigation", () => {
     );
 
     expect(result).toEqual({ type: "node", id: "narrow-node" });
+  });
+});
+
+describe("graph navigation state", () => {
+  const nodes = [node("from", source(1, 1)), node("to", source(2, 2))];
+  const relationship = edge("relationship", source(42, 42));
+  const fixture = graph(nodes, [relationship]);
+
+  it("clears node or edge selection when inventory filters change", () => {
+    const nodeState = reduceGraphNavigation(initialGraphNavigationState, {
+      type: "select-node",
+      id: "from",
+    });
+    const nodeReset = reduceGraphNavigation(nodeState, { type: "reset" });
+    expect(nodeReset).toEqual(initialGraphNavigationState);
+
+    const edgeState = reduceGraphNavigation(initialGraphNavigationState, {
+      type: "select-edge",
+      edge: relationship,
+    });
+    const edgeReset = reduceGraphNavigation(edgeState, { type: "reset" });
+    expect(edgeReset).toEqual(initialGraphNavigationState);
+  });
+
+  it("keeps a selected node as the viewport focus", () => {
+    expect(reduceGraphNavigation(initialGraphNavigationState, {
+      type: "select-node",
+      id: "from",
+    })).toEqual({
+      focus: ["from"],
+      selected: { type: "node", id: "from" },
+      focusedEvidenceRef: null,
+    });
+  });
+
+  it("keeps an explicitly selected edge and both endpoints in focus", () => {
+    expect(reduceGraphNavigation(initialGraphNavigationState, {
+      type: "select-edge",
+      edge: relationship,
+    })).toEqual({
+      focus: ["from", "to"],
+      selected: { type: "edge", id: "relationship" },
+      focusedEvidenceRef: null,
+    });
+  });
+
+  it("focuses both edge endpoints when navigating to its citation", () => {
+    expect(reduceGraphNavigation(initialGraphNavigationState, {
+      type: "focus-citation",
+      graph: fixture,
+      ref: source(42, 42),
+    })).toEqual({
+      focus: ["from", "to"],
+      selected: { type: "edge", id: "relationship" },
+      focusedEvidenceRef: source(42, 42),
+    });
+  });
+
+  it("preserves an unmatched citation without retaining an unrelated selection", () => {
+    const prior = reduceGraphNavigation(initialGraphNavigationState, {
+      type: "select-node",
+      id: "from",
+    });
+    expect(reduceGraphNavigation(prior, {
+      type: "focus-citation",
+      graph: fixture,
+      ref: source(100, 100),
+    })).toEqual({
+      focus: [],
+      selected: null,
+      focusedEvidenceRef: source(100, 100),
+    });
   });
 });

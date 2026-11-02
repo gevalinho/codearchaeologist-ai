@@ -16,7 +16,6 @@ import type {
   SourceRef,
 } from "../../lib/archaeology/scanner";
 import {
-  filterNodes,
   indexGraph,
   layout,
   MAX_ARTIFACT_BYTES,
@@ -25,6 +24,16 @@ import {
   promotionInvestigation,
   sourceReference,
 } from "../../lib/architecture/graph";
+import {
+  classifyArchitectureNode,
+  filterArchitectureNodes,
+  likelyThirdPartyNodeIds,
+  selectInitialArchitectureSeed,
+} from "../../lib/architecture/architecture-presentation";
+import {
+  relationshipEndpointIds,
+  relationshipLegend,
+} from "../../lib/architecture/relationship-presentation";
 import {
   canStartCanvasDrag,
   fitNodes,
@@ -45,7 +54,10 @@ import {
   createEvidencePacket,
   type EvidenceOrigin,
 } from "../../lib/architecture/ai-evidence";
-import { resolveEvidenceSelection } from "../../lib/architecture/evidence-navigation";
+import {
+  initialGraphNavigationState,
+  reduceGraphNavigation,
+} from "../../lib/architecture/evidence-navigation";
 import { createRepositoryEvidencePacket } from "../../lib/architecture/ai-repository-evidence";
 import {
   initialPreviewDrawerState,
@@ -78,6 +90,8 @@ import LocalScanPanel, {
 } from "./local-scan-panel";
 import BusinessRulesExplorer from "./business-rules-explorer";
 import SourceTraceExplorer from "./source-trace-explorer";
+import ArchitectureHealth from "./architecture-health";
+import RelationshipEvidence from "./relationship-evidence";
 import GitHubScanProgress, {
   appendObservedPhase,
 } from "./github-scan-progress";
@@ -131,7 +145,7 @@ export function repositorySelection(
       : "";
 }
 export const workspacePanelKey = (
-  panel: "business-rules" | "modules",
+  panel: "business-rules" | "modules" | "health",
   artifactVersion: number,
 ) => `${panel}:${artifactVersion}`;
 export default function ArchitectureWorkspace() {
@@ -141,18 +155,17 @@ export default function ArchitectureWorkspace() {
   const [domain, setDomain] = useState(""),
     [kind, setKind] = useState(""),
     [certainty, setCertainty] = useState("");
-  const [focus, setFocus] = useState<string[]>([]),
-    [depth, setDepth] = useState(1),
+  const [showLikelyThirdParty, setShowLikelyThirdParty] = useState(false);
+  const [navigation, dispatchNavigation] = useReducer(
+    reduceGraphNavigation,
+    initialGraphNavigationState,
+  );
+  const { focus, selected, focusedEvidenceRef } = navigation;
+  const [depth, setDepth] = useState(1),
     [direction, setDirection] = useState<"both" | "incoming" | "outgoing">(
       "both",
     );
-  const [selected, setSelected] = useState<{
-      type: "node" | "edge";
-      id: string;
-    } | null>(null),
-    [featured, setFeatured] = useState(false);
-  const [focusedEvidenceRef, setFocusedEvidenceRef] =
-    useState<SourceRef | null>(null);
+  const [featured, setFeatured] = useState(false);
   const [selectedFeatureId, setSelectedFeatureId] =
     useState("feature:promotion");
   const [featureQuery, setFeatureQuery] = useState("");
@@ -163,9 +176,9 @@ export default function ArchitectureWorkspace() {
     "features" | "rules" | "traces"
   >("features");
   const [featureAiActivation, setFeatureAiActivation] = useState(0);
-  const [architectureView, setArchitectureView] = useState<"map" | "modules">(
-    "map",
-  );
+  const [architectureView, setArchitectureView] = useState<
+    "map" | "modules" | "health"
+  >("map");
   const [showNewInvestigation, setShowNewInvestigation] = useState(false);
   const [scanPhase, setScanPhase] = useState<LocalScanPhase>("idle");
   const [scanSelection, setScanSelection] = useState<{
@@ -281,17 +294,21 @@ export default function ArchitectureWorkspace() {
     }
   }
   const index = useMemo(() => (graph ? indexGraph(graph) : null), [graph]);
+  const vendorNodeIds = useMemo(
+    () => likelyThirdPartyNodeIds(graph?.nodes ?? []),
+    [graph],
+  );
   const matches = useMemo(
     () =>
       graph
-        ? filterNodes(graph.nodes, {
+        ? filterArchitectureNodes(graph.nodes, {
             query,
             domains: new Set(domain ? [domain] : []),
             kinds: new Set(kind ? [kind] : []),
             certainties: new Set(certainty ? [certainty] : []),
-          })
+          }, showLikelyThirdParty)
         : [],
-    [graph, query, domain, kind, certainty],
+    [graph, query, domain, kind, certainty, showLikelyThirdParty],
   );
   const promotion = useMemo(
     () => (graph ? promotionInvestigation(graph) : null),
@@ -363,19 +380,38 @@ export default function ArchitectureWorkspace() {
     : reconstruction
       ? `${reconstruction.id}:${reconstruction.sourceSnapshotId}`
       : null;
+  const initialSeed = useMemo(
+    () => selectInitialArchitectureSeed(matches),
+    [matches],
+  );
+  const allowedNodeIds = useMemo(
+    () => showLikelyThirdParty
+      ? undefined
+      : new Set(
+          (graph?.nodes ?? [])
+            .filter((node) => !vendorNodeIds.has(node.id))
+            .map((node) => node.id),
+      ),
+    [graph, showLikelyThirdParty, vendorNodeIds],
+  );
   const view = useMemo(
     () =>
       graph
-        ? neighborhood(
+          ? neighborhood(
             graph,
-            focus.length ? focus : matches.slice(0, 1).map((node) => node.id),
+            focus.length ? focus : initialSeed ? [initialSeed] : [],
             depth,
             direction,
+            allowedNodeIds,
           )
-        : null,
-    [graph, focus, matches, depth, direction],
+          : null,
+    [graph, focus, initialSeed, depth, direction, allowedNodeIds],
   );
   const positions = useMemo(() => layout(view?.nodes ?? []), [view]);
+  const relationshipKinds = useMemo(
+    () => graph ? relationshipLegend(graph) : null,
+    [graph],
+  );
   useLayoutEffect(() => {
     const element = canvasRef.current;
     if (!element) return;
@@ -441,9 +477,7 @@ export default function ArchitectureWorkspace() {
     setGraph(parsed);
     setScanOrigin(origin);
     setSourceJobId(jobId);
-    setFocus([]);
-    setSelected(null);
-    setFocusedEvidenceRef(null);
+    dispatchNavigation({ type: "reset" });
     setFeatured(false);
     setSelectedFeatureId("feature:promotion");
     setFeatureQuery("");
@@ -754,14 +788,11 @@ export default function ArchitectureWorkspace() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   function selectNode(node: Node) {
-    setSelected({ type: "node", id: node.id });
-    setFocusedEvidenceRef(null);
-    setFocus([node.id]);
+    dispatchNavigation({ type: "select-node", id: node.id });
     setFeatured(false);
   }
   function selectEdge(edge: Edge) {
-    setSelected({ type: "edge", id: edge.id });
-    setFocusedEvidenceRef(null);
+    dispatchNavigation({ type: "select-edge", edge });
   }
   function focusFeatureNode(node: Node) {
     selectNode(node);
@@ -769,20 +800,11 @@ export default function ArchitectureWorkspace() {
   }
   function focusFeatureEdge(edge: Edge) {
     selectEdge(edge);
-    setFocus([edge.from, edge.to]);
     setSection("evidence");
   }
   function focusEvidenceRef(ref: SourceRef) {
-    const selection = resolveEvidenceSelection(graph, ref);
-    setFocusedEvidenceRef(ref);
-    setSelected(selection);
-    if (selection?.type === "node") {
-      setFocus([selection.id]);
-      setFeatured(false);
-    } else if (!selection) {
-      setFocus([]);
-      setFeatured(false);
-    }
+    dispatchNavigation({ type: "focus-citation", graph, ref });
+    setFeatured(false);
     setSection("evidence");
   }
   function selectFeature(feature: FeatureInvestigation) {
@@ -792,14 +814,13 @@ export default function ArchitectureWorkspace() {
     });
     setSelectedFeatureId(feature.id);
     setFeatured(feature.id === "feature:promotion");
-    setFocus(
-      feature.components
+    dispatchNavigation({
+      type: "focus-nodes",
+      ids: feature.components
         .filter((component) => component.association === "anchor")
         .slice(0, 12)
         .map((component) => component.node.id),
-    );
-    setSelected(null);
-    setFocusedEvidenceRef(null);
+    });
     setDepth(1);
     setDirection("both");
   }
@@ -811,10 +832,8 @@ export default function ArchitectureWorkspace() {
     }
   }
   function focusModule(ids: string[]) {
-    setFocus(ids.slice(0, 36));
+    dispatchNavigation({ type: "focus-nodes", ids: ids.slice(0, 36) });
     setDepth(0);
-    setSelected(null);
-    setFocusedEvidenceRef(null);
     setFeatured(false);
     setArchitectureView("map");
     setSection("architecture");
@@ -866,6 +885,9 @@ export default function ArchitectureWorkspace() {
   }
   const selectedConnected = new Set(
     activeNode ? [...incoming, ...outgoing].map((edge) => edge.id) : [],
+  );
+  const selectedEndpointIds = new Set(
+    activeEdge ? relationshipEndpointIds(activeEdge) : [],
   );
   return (
     <main className="architecture">
@@ -1512,6 +1534,14 @@ export default function ArchitectureWorkspace() {
                 >
                   Module explorer
                 </button>
+                <button
+                  aria-current={
+                    architectureView === "health" ? "page" : undefined
+                  }
+                  onClick={() => setArchitectureView("health")}
+                >
+                  Architecture health
+                </button>
               </div>
               {graph && moduleDiscovery && architectureView === "modules" && (
                 <ModuleExplorer
@@ -1526,6 +1556,19 @@ export default function ArchitectureWorkspace() {
                     setWorkflowView("features");
                     setSection("workflows");
                   }}
+                />
+              )}
+              {graph && architectureView === "health" && (
+                <ArchitectureHealth
+                  key={workspacePanelKey("health", artifactVersion)}
+                  graph={graph}
+                  origin={scanOrigin}
+                  artifactId={sourceJobId}
+                  onExploreComponent={(component) => {
+                    setArchitectureView("map");
+                    selectNode(component);
+                  }}
+                  onFocusEvidence={focusEvidenceRef}
                 />
               )}
               {architectureView === "map" && (
@@ -1551,7 +1594,7 @@ export default function ArchitectureWorkspace() {
                               value={query}
                               onChange={(event) => {
                                 setQuery(event.target.value);
-                                setFocus([]);
+                                dispatchNavigation({ type: "reset" });
                                 setFeatured(false);
                               }}
                               placeholder="Search symbols, paths, endpoints…"
@@ -1559,12 +1602,24 @@ export default function ArchitectureWorkspace() {
                             />
                           </label>
                           <div className="arch-filters">
+                            <label className="arch-vendor-toggle">
+                              <input
+                                type="checkbox"
+                                checked={showLikelyThirdParty}
+                                onChange={(event) => {
+                                  setShowLikelyThirdParty(event.target.checked);
+                                  dispatchNavigation({ type: "reset" });
+                                  setFeatured(false);
+                                }}
+                              />
+                              Show likely third-party ({vendorNodeIds.size})
+                            </label>
                             <select
                               aria-label="Domain filter"
                               value={domain}
                               onChange={(event) => {
                                 setDomain(event.target.value);
-                                setFocus([]);
+                                dispatchNavigation({ type: "reset" });
                               }}
                             >
                               <option value="">All domains</option>
@@ -1577,7 +1632,7 @@ export default function ArchitectureWorkspace() {
                               value={kind}
                               onChange={(event) => {
                                 setKind(event.target.value);
-                                setFocus([]);
+                                dispatchNavigation({ type: "reset" });
                               }}
                             >
                               <option value="">All node types</option>
@@ -1590,7 +1645,7 @@ export default function ArchitectureWorkspace() {
                               value={certainty}
                               onChange={(event) => {
                                 setCertainty(event.target.value);
-                                setFocus([]);
+                                dispatchNavigation({ type: "reset" });
                               }}
                             >
                               <option value="">All evidence</option>
@@ -1632,29 +1687,42 @@ export default function ArchitectureWorkspace() {
                                     {group.toUpperCase()}{" "}
                                     <span>{items.length}</span>
                                   </summary>
-                                  {items.slice(0, 80).map((node) => (
-                                    <button
-                                      key={node.id}
-                                      className={
-                                        selected?.id === node.id ? "active" : ""
-                                      }
-                                      onClick={() => selectNode(node)}
-                                      title={node.name}
-                                    >
-                                      <span
-                                        className="arch-node-dot"
-                                        style={{
-                                          background: colors[node.domain],
-                                        }}
-                                      />
-                                      <span>{node.name.split("/").pop()}</span>
-                                      <small>
-                                        {node.certainty === "inferred"
-                                          ? "◌"
-                                          : "●"}
-                                      </small>
-                                    </button>
-                                  ))}
+                                  {items.slice(0, 80).map((node) => {
+                                    const classification =
+                                      classifyArchitectureNode(node);
+                                    return (
+                                      <button
+                                        key={node.id}
+                                        className={
+                                          selected?.id === node.id ? "active" : ""
+                                        }
+                                        onClick={() => selectNode(node)}
+                                        title={node.name}
+                                      >
+                                        <span
+                                          className="arch-node-dot"
+                                          style={{
+                                            background: colors[node.domain],
+                                          }}
+                                        />
+                                        <span>{node.name.split("/").pop()}</span>
+                                        <small
+                                          className={`arch-origin arch-origin-${classification}`}
+                                        >
+                                          {classification === "application"
+                                            ? "APP"
+                                            : classification === "likely-third-party"
+                                              ? "LIKELY VENDOR"
+                                              : "UNCLASSIFIED"}
+                                        </small>
+                                        <small>
+                                          {node.certainty === "inferred"
+                                            ? "◌"
+                                            : "●"}
+                                        </small>
+                                      </button>
+                                    );
+                                  })}
                                   {items.length > 80 && (
                                     <p>Showing first 80. Narrow your search.</p>
                                   )}
@@ -1784,13 +1852,13 @@ export default function ArchitectureWorkspace() {
                               <defs>
                                 <marker
                                   id="arrow"
-                                  markerWidth="8"
-                                  markerHeight="8"
-                                  refX="7"
+                                  markerWidth="6"
+                                  markerHeight="6"
+                                  refX="5"
                                   refY="4"
                                   orient="auto"
                                 >
-                                  <path d="M0,0 L8,4 L0,8" fill="#718394" />
+                                  <path d="M0,0 L6,4 L0,8" fill="#718394" />
                                 </marker>
                               </defs>
                               <g
@@ -1820,7 +1888,7 @@ export default function ArchitectureWorkspace() {
                                         y2={to.y}
                                       />
                                       <line
-                                        className={`graph-edge ${edge.certainty} ${selectedConnected.has(edge.id) || selected?.id === edge.id ? "highlight" : ""}`}
+                                        className={`graph-edge ${edge.certainty} ${selectedConnected.has(edge.id) || (selected?.type === "edge" && selected.id === edge.id) ? "highlight" : ""}`}
                                         x1={from.x}
                                         y1={from.y}
                                         x2={to.x}
@@ -1830,13 +1898,28 @@ export default function ArchitectureWorkspace() {
                                     </g>
                                   );
                                 })}
+                                {activeEdge && (() => {
+                                  const from = positions.get(activeEdge.from);
+                                  const to = positions.get(activeEdge.to);
+                                  return from && to ? (
+                                    <text
+                                      className="relationship-edge-label"
+                                      x={(from.x + to.x) / 2}
+                                      y={(from.y + to.y) / 2 - 12}
+                                      textAnchor="middle"
+                                      pointerEvents="none"
+                                    >
+                                      {activeEdge.kind} · {activeEdge.certainty}
+                                    </text>
+                                  ) : null;
+                                })()}
                                 {view?.nodes.map((node) => {
                                   const point = positions.get(node.id)!,
                                     label = graphNodeLabel(node);
                                   return (
                                     <g
                                       key={node.id}
-                                      className={`graph-node ${selected?.id === node.id ? "selected" : ""}`}
+                                      className={`graph-node ${selected?.type === "node" && selected.id === node.id ? "selected" : ""} ${selectedEndpointIds.has(node.id) ? "relationship-endpoint" : ""}`}
                                       data-graph-interactive
                                       transform={`translate(${point.x - 83} ${point.y - 31})`}
                                       role="button"
@@ -1898,10 +1981,28 @@ export default function ArchitectureWorkspace() {
                             </svg>
                           </div>
                           <div className="arch-canvas-foot">
-                            <span>
-                              ● observed extraction &nbsp; ◌ inferred
-                              relationship
-                            </span>
+                            <details className="arch-relationship-legend">
+                              <summary>Relationship legend</summary>
+                              <p>
+                                Arrow points source → target. Observed means a
+                                source pattern was found, not runtime verified;
+                                inferred links need source review.
+                              </p>
+                              <ul>
+                                {relationshipKinds?.kinds.map((item) => (
+                                  <li key={item.kind}>
+                                    <strong>{item.kind}</strong> · {item.description}
+                                  </li>
+                                ))}
+                              </ul>
+                              {!!relationshipKinds?.remaining && (
+                                <small>
+                                  {relationshipKinds.remaining} other relationship
+                                  type{relationshipKinds.remaining === 1 ? "" : "s"}
+                                  {" "}in this graph.
+                                </small>
+                              )}
+                            </details>
                             <span>
                               Showing a focused subset. Select a component to
                               explore.
@@ -1956,44 +2057,27 @@ export default function ArchitectureWorkspace() {
                             <dt>EXTRACTION METHOD</dt>
                             <dd>{activeNode?.method ?? activeEdge?.method}</dd>
                           </dl>
-                          <div className="arch-source">
-                            <small>SOURCE REFERENCE</small>
-                            <code>
-                              {sourceReference(
-                                (activeNode ?? activeEdge)!.source,
-                              )}
-                            </code>
-                            <button
-                              onClick={() =>
-                                navigator.clipboard.writeText(
-                                  sourceReference(
-                                    (activeNode ?? activeEdge)!.source,
-                                  ),
-                                )
-                              }
-                            >
-                              Copy reference
-                            </button>
-                          </div>
-                          {activeEdge && (
-                            <div className="arch-relations">
-                              <h4>Directed relationship</h4>
+                          {activeNode && (
+                            <div className="arch-source">
+                              <small>SOURCE REFERENCE</small>
+                              <code>{sourceReference(activeNode.source)}</code>
                               <button
                                 onClick={() =>
-                                  selectNode(index!.nodes.get(activeEdge.from)!)
+                                  navigator.clipboard.writeText(
+                                    sourceReference(activeNode.source),
+                                  )
                                 }
                               >
-                                {index?.nodes.get(activeEdge.from)?.name}
-                              </button>
-                              <span>↓ {activeEdge.kind}</span>
-                              <button
-                                onClick={() =>
-                                  selectNode(index!.nodes.get(activeEdge.to)!)
-                                }
-                              >
-                                {index?.nodes.get(activeEdge.to)?.name}
+                                Copy reference
                               </button>
                             </div>
+                          )}
+                          {activeEdge && (
+                            <RelationshipEvidence
+                              edge={activeEdge}
+                              nodes={index?.nodes ?? new Map()}
+                              onSelectNode={selectNode}
+                            />
                           )}
                           {activeNode && (
                             <div className="arch-relations">
@@ -2087,42 +2171,27 @@ export default function ArchitectureWorkspace() {
                         Extraction method:{" "}
                         {activeNode?.method ?? activeEdge?.method}
                       </p>
-                      <div className="arch-source">
-                        <small>SOURCE REFERENCE</small>
-                        <code>
-                          {sourceReference((activeNode ?? activeEdge)!.source)}
-                        </code>
-                        <button
-                          onClick={() =>
-                            void navigator.clipboard.writeText(
-                              sourceReference(
-                                (activeNode ?? activeEdge)!.source,
-                              ),
-                            )
-                          }
-                        >
-                          Copy reference
-                        </button>
-                      </div>
-                      {activeEdge && (
-                        <div className="arch-relations">
-                          <h4>Supporting relationship</h4>
+                      {activeNode && (
+                        <div className="arch-source">
+                          <small>SOURCE REFERENCE</small>
+                          <code>{sourceReference(activeNode.source)}</code>
                           <button
                             onClick={() =>
-                              selectNode(index!.nodes.get(activeEdge.from)!)
+                              void navigator.clipboard.writeText(
+                                sourceReference(activeNode.source),
+                              )
                             }
                           >
-                            {index?.nodes.get(activeEdge.from)?.name}
-                          </button>
-                          <span>↓ {activeEdge.kind}</span>
-                          <button
-                            onClick={() =>
-                              selectNode(index!.nodes.get(activeEdge.to)!)
-                            }
-                          >
-                            {index?.nodes.get(activeEdge.to)?.name}
+                            Copy reference
                           </button>
                         </div>
+                      )}
+                      {activeEdge && (
+                        <RelationshipEvidence
+                          edge={activeEdge}
+                          nodes={index?.nodes ?? new Map()}
+                          onSelectNode={selectNode}
+                        />
                       )}
                       {activeNode && (
                         <>

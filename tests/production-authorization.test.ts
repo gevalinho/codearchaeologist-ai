@@ -10,6 +10,7 @@ import { verifiedGitHubSession } from "../src/lib/github-ingestion/production-au
 import { GitHubJobManager, type JobDependencies } from "../src/lib/github-ingestion/jobs";
 import { authorizedGitHubGraph, authorizedGitHubPacket } from "../src/lib/architecture/ai-artifact-authorization";
 import { createRepositoryEvidencePacket } from "../src/lib/architecture/ai-repository-evidence";
+import { createHealthAdvisorPacket } from "../src/lib/architecture/ai-health-advisor";
 import { discoverFeatures } from "../src/lib/architecture/features";
 import { createAiInterpretationHandler, allowProductionAi } from "../src/lib/architecture/ai-service";
 import { createAutonomousInvestigationHandler } from "../src/lib/architecture/autonomous-service";
@@ -103,6 +104,62 @@ describe("production session and artifact authorization", () => {
     expect(provider.requests).toHaveLength(1);
     const anonymous = createAiInterpretationHandler({ enabled: true, origin: "https://app.example", createProvider: () => provider, privateAuthorized: () => false, authenticate: async () => null, authorizeArtifact: async () => true });
     expect((await anonymous(call(payload))).status).toBe(401);
+  });
+
+  it("derives Architecture Health advice from the canonical owned GitHub graph", async () => {
+    const user = alice();
+    const canonical: Graph = {
+      schemaVersion: "1.0.0",
+      snapshotId: "github-health-snapshot",
+      scan: { fileCount: 1, totalBytes: 1200 },
+      nodes: [{
+        id: "controller:health",
+        kind: "controller",
+        name: "HealthController",
+        domain: "unknown",
+        certainty: "observed",
+        method: "fixture",
+        source: { path: "application/controllers/HealthController.php", startLine: 1, endLine: 250 },
+      }],
+      edges: [],
+      warnings: [],
+      limitations: [],
+      githubSource: { owner: "example", name: "repo", commitSha: "a".repeat(40), visibility: "public" },
+    };
+    const manager = new GitHubJobManager({ ...deps(), scan: async () => JSON.stringify(canonical) });
+    const job = manager.createPublic(repo, user);
+    await manager.wait(job.id);
+    const graphArtifact = await authorizedGitHubGraph(job.id, "public-github", user, manager);
+    expect(graphArtifact).not.toBeNull();
+    const finding = createHealthAdvisorPacket(graphArtifact!).findings[0];
+    const evidenceId = finding.evidenceIds[0];
+    const provider = new MockModelProvider([{
+      schemaVersion: "1.0.0",
+      observations: [{ findingId: finding.id, explanation: "The measured source span merits review, not a defect verdict.", evidenceIds: [evidenceId] }],
+      recommendations: [{ findingId: finding.id, hypothesis: "Inspect the controller's cohesive method groups.", investigationSteps: ["Review source and incoming routes.", "Trace downstream dependencies.", "Add regression tests before incremental changes."], evidenceIds: [evidenceId] }],
+      uncertainty: ["Source and test behavior were not inspected."],
+    }]);
+    const handler = createAiInterpretationHandler({
+      enabled: true,
+      origin: "https://app.example",
+      authenticate: async () => user,
+      createProvider: () => provider,
+      privateAuthorized: () => false,
+      resolveGraph: (id, origin, _request, identity) =>
+        identity ? authorizedGitHubGraph(id, origin, identity, manager) : Promise.resolve(null),
+    });
+    const call = (graphValue: Graph, artifactId = job.id) => new Request("https://app.example/api/feature-interpretation", {
+      method: "POST",
+      headers: { Origin: "https://app.example", "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "architecture-health", graph: graphValue, origin: "public-github", artifactId, consent: true }),
+    });
+
+    expect((await handler(call(graphArtifact!))).status).toBe(200);
+    const changed = structuredClone(graphArtifact!);
+    changed.nodes[0].name = "ForgedController";
+    expect((await handler(call(changed))).status).toBe(404);
+    expect((await handler(call(graphArtifact!, "unowned-job"))).status).toBe(404);
+    expect(provider.requests).toHaveLength(1);
   });
 
   it("rejects forged autonomous graphs before model calls and keeps production opt-in closed by default", async () => {

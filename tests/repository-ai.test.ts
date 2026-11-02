@@ -4,6 +4,8 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Graph } from "../src/lib/archaeology/scanner";
 import { MockModelProvider } from "../src/lib/ai/mock-provider";
+import { ModelProviderError } from "../src/lib/ai/model-provider";
+import type { SqliteQuotaStore } from "../src/lib/github-ingestion/quota-store";
 import { allowedSource } from "../src/lib/archaeology/selection";
 import { createEvidencePacket, parseEvidencePacket } from "../src/lib/architecture/ai-evidence";
 import { parseChatHistory } from "../src/lib/architecture/ai-chat";
@@ -25,6 +27,23 @@ const feature = features.find(item => item.id === "feature:core")!;
 const featurePacket = () => createEvidencePacket(graph, feature, planReconstruction(graph, feature), "public-github");
 const key = "x".repeat(40);
 const request = (body: unknown) => new Request("https://app.example/api/feature-interpretation", { method: "POST", headers: { Origin: "https://app.example", "Content-Type": "application/json", "x-codearchaeologist-ai-access-key": key }, body: JSON.stringify(body) });
+const streamedRequest = (body: unknown) => {
+  const bytes = new TextEncoder().encode(JSON.stringify(body));
+  const multibyte = bytes.findIndex(byte => byte === 0xc3) + 1;
+  const init: RequestInit & { duplex: "half" } = {
+    method: "POST",
+    headers: { Origin: "https://app.example", "Content-Type": "application/json", "x-codearchaeologist-ai-access-key": key },
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, multibyte));
+        controller.enqueue(bytes.slice(multibyte));
+        controller.close();
+      },
+    }),
+    duplex: "half",
+  };
+  return new Request("https://app.example/api/feature-interpretation", init);
+};
 const handler = (provider: MockModelProvider) => createAiInterpretationHandler({ enabled: true, origin: "https://app.example", accessKey: key, createProvider: () => provider, privateAuthorized: () => false, now: () => 20_000 });
 
 describe("repository-wide AI evidence", () => {
@@ -211,6 +230,54 @@ describe("repository-wide AI evidence", () => {
     expect(provider.requests[0].instructions).toContain("exact anchor evidence ID");
     expect(provider.requests[0].schema).toEqual(repositoryChatSchema);
     expect(provider.requests[0].input).not.toContain("sourceBody");
+  });
+
+  it("preserves successful repository analysis when UTF-8 bytes arrive across stream chunks", async () => {
+    const packet = repo();
+    const answer = { schemaVersion: "1.0.0", status: "observed-structure", answer: "The represented candidates are static evidence.", evidenceIds: [packet.items[0].id], uncertainty: "Runtime behavior is unverified." };
+    const provider = new MockModelProvider([answer]);
+    const response = await handler(provider)(streamedRequest({ packet, consent: true, question: "¿Qué muestra?", history: [] }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ scope: "repository", answer });
+    expect(provider.requests).toHaveLength(1);
+  });
+
+  it("returns valid JSON for request-size failures and provider timeouts", async () => {
+    const provider = new MockModelProvider([]);
+    const tooLarge = await handler(provider)(request({ consent: true, padding: "x".repeat(20_100) }));
+    expect(tooLarge.status).toBe(413);
+    expect(await tooLarge.json()).toMatchObject({ error: "Request exceeds the 20 KB limit." });
+
+    const timeout = await handler(new MockModelProvider([new ModelProviderError("TIMEOUT", "private timeout detail")]))(
+      request({ packet: repo(), consent: true, question: "What is shown?", history: [] }),
+    );
+    expect(timeout.status).toBe(503);
+    const body = await timeout.text();
+    expect(JSON.parse(body)).toMatchObject({ diagnostic: { category: "provider_timeout" } });
+    expect(body).not.toContain("private timeout detail");
+  });
+
+  it("sanitizes unexpected API-boundary failures as JSON instead of terminating without a response", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const handle = createAiInterpretationHandler({
+      enabled: true,
+      origin: "https://app.example",
+      accessKey: key,
+      createProvider: () => new MockModelProvider([]),
+      privateAuthorized: () => false,
+      quota: () => ({
+        reserve: () => { throw new Error("private quota store failure"); },
+      }) as unknown as SqliteQuotaStore,
+    });
+    const response = await handle(request({ packet: repo(), consent: true, question: "What is shown?", history: [] }));
+    expect(response.status).toBe(500);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toEqual({
+      error: "AI request could not be completed. Retry shortly.",
+      diagnostic: { category: "request_failed" },
+    });
+    expect(log).toHaveBeenCalledWith("[Feature AI] request failed at quota_reservation (Error)");
+    log.mockRestore();
   });
 
   it("allows a named Password PHP controller while keeping sensitive paths excluded", () => {

@@ -10,6 +10,7 @@ import type { RepositoryEvidencePacket } from "../../lib/architecture/ai-reposit
 import { parseChatAnswer } from "../../lib/architecture/ai-chat";
 import { parseRepositoryAnswer } from "../../lib/architecture/ai-repository-chat";
 import { appendAssistantAnswer, assistantContextId, assistantNeedsConsent, emptyAssistantThread, type AssistantScope, type AssistantThread } from "../../lib/architecture/assistant-context";
+import { readAiJsonResponse, serializeBoundedChatRequest } from "../../lib/architecture/ai-http-response";
 import { sourceReference } from "../../lib/architecture/graph";
 
 type Props = { open: boolean; onClose: () => void; repositoryName: string; graph: Graph | null; origin: EvidenceOrigin | null; artifactId?: string | null; repositoryPacket: RepositoryEvidencePacket | null; featurePacket: EvidencePacket | null; featureName: string | null; onFocusEvidence: (ref: SourceRef) => void };
@@ -43,7 +44,7 @@ export default function WorkspaceAssistant({ open, onClose, repositoryName, grap
     setInvestigationLoading(true); setInvestigationError(""); setInvestigationEvents([]); setInvestigationReport(null); setInvestigationReview(false);
     try {
       const response = await fetch("/api/autonomous-investigation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ goal, graph, origin, consent: true, ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
-      if (!response.ok) { const body = await response.json(); throw new Error(typeof body.error === "string" ? body.error : "Investigation request failed."); }
+      if (!response.ok) { const body = await readAiJsonResponse(response); throw new Error(typeof body.error === "string" ? body.error : "Investigation request failed."); }
       if (!response.body) throw new Error("Investigation stream unavailable.");
       const reader = response.body.getReader(); const decoder = new TextDecoder(); let pending = "", completed = false;
       try {
@@ -80,8 +81,8 @@ export default function WorkspaceAssistant({ open, onClose, repositoryName, grap
     const controller = new AbortController(); requestRef.current = controller; setLoading(true); setError("");
     try {
       const current = threads[contextId] ?? emptyAssistantThread();
-      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true, question, history: current.history.slice(-6), ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
-      const body = await response.json();
+      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: serializeBoundedChatRequest({ packet, consent: true, question, history: current.history, ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
+      const body = await readAiJsonResponse(response);
       if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "AI request failed. Retry shortly.");
       if (body.snapshotId !== packet.snapshotId || (scope === "repository" ? body.scope !== "repository" : body.featureId !== (packet as EvidencePacket).featureId)) throw new Error("AI answer belongs to a different investigation.");
       const answer = scope === "repository" ? parseRepositoryAnswer(body.answer, packet as RepositoryEvidencePacket) : parseChatAnswer(body.answer, packet as EvidencePacket);

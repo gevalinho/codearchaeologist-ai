@@ -5,6 +5,7 @@ import type { SourceRef } from "../../lib/archaeology/scanner";
 import type { ChatTurn } from "../../lib/architecture/ai-chat";
 import { parseRepositoryAnswer, type RepositoryAnswer } from "../../lib/architecture/ai-repository-chat";
 import type { RepositoryEvidencePacket } from "../../lib/architecture/ai-repository-evidence";
+import { isAiJsonRecord, readAiJsonResponse, serializeBoundedChatRequest } from "../../lib/architecture/ai-http-response";
 import { sourceReference } from "../../lib/architecture/graph";
 
 export default function RepositoryAiPanel({ packet, artifactId, onFocusEvidence, onSelectedFeature }: { packet: RepositoryEvidencePacket | null; artifactId?: string | null; onFocusEvidence: (ref: SourceRef) => void; onSelectedFeature: () => void }) {
@@ -18,13 +19,14 @@ export default function RepositoryAiPanel({ packet, artifactId, onFocusEvidence,
     if (!asked) return;
     const controller = new AbortController(); pending.current = controller; setLoading(true); setError("");
     try {
-      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packet, consent: true, question: asked, history: history.slice(-6), ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
-      const body = await response.json();
+      const response = await fetch("/api/feature-interpretation", { method: "POST", headers: { "Content-Type": "application/json" }, body: serializeBoundedChatRequest({ packet, consent: true, question: asked, history, ...(artifactId ? { artifactId } : {}) }), cache: "no-store", signal: controller.signal });
+      const body = await readAiJsonResponse(response);
       if (!response.ok) {
-        const code = body.diagnostic?.category === "invalid_interpretation" && typeof body.diagnostic?.validationCategory === "string" ? body.diagnostic.validationCategory : null;
+        const diagnostic = isAiJsonRecord(body.diagnostic) ? body.diagnostic : {};
+        const code = diagnostic.category === "invalid_interpretation" && typeof diagnostic.validationCategory === "string" ? diagnostic.validationCategory : null;
         const explanations: Record<string, string> = { structure: "The AI response did not match the required structure.", classification: "The AI used an unsupported answer classification.", unsafe_text: "The AI response included an unsupported source reference or unsafe text.", citation_limit: "The AI supplied too many or repeated citations.", citation_unknown: "The AI cited evidence outside this packet.", citation_missing: "The AI answer had no supporting citation.", candidate_anchor: "A named candidate lacked its supporting anchor.", purpose_anchors: "The inference lacked two independent candidate anchors.", insufficient_evidence: "The insufficient-evidence answer was not structured correctly." };
-        const field = body.diagnostic?.field === "answer" || body.diagnostic?.field === "uncertainty" ? body.diagnostic.field : null;
-        const rule = ["control_character", "html_delimiter", "unsafe_url", "source_reference"].includes(body.diagnostic?.rule) ? body.diagnostic.rule : null;
+        const field = diagnostic.field === "answer" || diagnostic.field === "uncertainty" ? diagnostic.field : null;
+        const rule = typeof diagnostic.rule === "string" && ["control_character", "html_delimiter", "unsafe_url", "source_reference"].includes(diagnostic.rule) ? diagnostic.rule : null;
         const detail = code === "unsafe_text" && field && rule ? ` (${field}: ${rule.replaceAll("_", " ")})` : code ? ` (${code})` : "";
         throw new Error(code && explanations[code] ? `${explanations[code]}${detail} Retry or ask a narrower question.` : typeof body.error === "string" ? body.error : "Repository AI answer failed. Retry shortly.");
       }
