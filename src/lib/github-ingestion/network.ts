@@ -15,6 +15,7 @@ export class OAuthNetworkFailure extends Error {
 export class GitHubHttpFailure extends Error {
   constructor(readonly status: number) { super(`GitHub request failed with HTTP ${status}.`); this.name = "GitHubHttpFailure"; }
 }
+export const GITHUB_RESPONSE_TOO_LARGE_MESSAGE = "GitHub response exceeds the size limit.";
 const providerCodes = new Set(["incorrect_client_credentials", "redirect_uri_mismatch", "bad_verification_code", "bad_refresh_token", "access_denied", "invalid_request", "unsupported_grant_type", "unverified_user_email"]);
 export function safeOAuthProviderCode(value: unknown): string | undefined { return typeof value === "string" && providerCodes.has(value) ? value : undefined; }
 export function oauthProviderCode(body: Buffer): string | undefined {
@@ -115,9 +116,9 @@ export const fixedHostFetch: FixedHostFetch = async (host, path, maxBytes, signa
       }
       try { requireSuccessfulGitHubStatus(status, options.method); } catch (error) { response.destroy(); finish(error as Error); return; }
       const announced = Number(response.headers["content-length"]);
-      if (Number.isFinite(announced) && announced > maxBytes) { response.destroy(); finish(options.oauthJson ? new OAuthNetworkFailure("response_limit", status) : new Error("GitHub response exceeds the size limit.")); return; }
+      if (Number.isFinite(announced) && announced > maxBytes) { response.destroy(); finish(options.oauthJson ? new OAuthNetworkFailure("response_limit", status) : new Error(GITHUB_RESPONSE_TOO_LARGE_MESSAGE)); return; }
       let size = 0; const chunks: Buffer[] = [];
-      response.on("data", (chunk: Buffer) => { size += chunk.length; if (size > maxBytes) { response.destroy(); finish(options.oauthJson ? new OAuthNetworkFailure("response_limit", status) : new Error("GitHub response exceeds the size limit.")); } else chunks.push(chunk); });
+      response.on("data", (chunk: Buffer) => { size += chunk.length; if (size > maxBytes) { response.destroy(); finish(options.oauthJson ? new OAuthNetworkFailure("response_limit", status) : new Error(GITHUB_RESPONSE_TOO_LARGE_MESSAGE)); } else chunks.push(chunk); });
       response.on("end", () => finish(undefined, Buffer.concat(chunks, size)));
       response.on("error", () => finish(options.oauthJson ? new OAuthNetworkFailure("connection") : new Error("GitHub response failed.")));
     });

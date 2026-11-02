@@ -21,3 +21,9 @@ Limitations: only exact reviewed claims for the pinned fixture can be verified. 
 Implemented: a responsive source and findings workbench; a fixture-only, opt-in live investigation API; an operator-only Docker verification command; and a validated local report viewer. The browser cannot trigger Docker execution. Live inference and Docker verification require explicit operator action and have not been run as part of automated tests. See [local demo instructions](demo.md).
 
 Each phase ends with type generation, type checking, linting, relevant automated tests, and production build. No commit, push, merge, or deployment occurs without user approval.
+
+## Future: Secure Local Repository Import
+
+Allow developers to analyze repositories from their computers through a deliberately designed import mechanism, such as a validated archive upload or dedicated local CLI.
+
+The future implementation must include authentication, strict size and file-count limits, archive traversal protection, symlink handling, resource limits, and isolated processing.

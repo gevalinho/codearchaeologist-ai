@@ -19,6 +19,7 @@ import {
   type AuthorizedRepository,
 } from "./app";
 import type { UserSession } from "./session";
+import { GITHUB_RESPONSE_TOO_LARGE_MESSAGE } from "./network";
 import { SqliteJobStore, type JobOwner } from "./job-store";
 import { privateDirectory } from "./state-db";
 import { SqliteQuotaStore, type QuotaLease } from "./quota-store";
@@ -37,6 +38,13 @@ import {
   type SpoolOwners,
   type SpoolRoots,
 } from "./spool";
+
+export const REPOSITORY_SIZE_LIMIT_MESSAGE = "Repository exceeds the analysis size limit. This repository contains more data than CodeArchaeologist AI can safely retrieve in a single investigation. Try analyzing a smaller repository or preparing a reduced copy containing the source files you want to investigate.";
+
+export function toUserFacingJobError(error: unknown): string {
+  if (error instanceof Error && error.message === GITHUB_RESPONSE_TOO_LARGE_MESSAGE) return REPOSITORY_SIZE_LIMIT_MESSAGE;
+  return error instanceof Error ? error.message : "GitHub analysis failed.";
+}
 
 export type GitHubJobPhase =
   | "validating-repository-url"
@@ -621,11 +629,7 @@ export class GitHubJobManager {
     } catch (error) {
       this.cancelHandoff(job.status.id);
       if (!job.controller.signal.aborted)
-        this.update(
-          job,
-          "failed",
-          error instanceof Error ? error.message : "GitHub analysis failed.",
-        );
+        this.update(job, "failed", toUserFacingJobError(error));
     } finally {
       clearTimeout(deadline);
       try {
