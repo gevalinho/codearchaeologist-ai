@@ -154,6 +154,8 @@ describe("repository-wide AI evidence", () => {
     expect(repositoryChatInstructions).toContain("exact title");
     expect(repositoryChatInstructions).toContain("exact anchor evidence ID");
     expect(repositoryChatInstructions).toContain("For any status inference, cite at least two distinct candidate anchors");
+    expect(repositoryChatInstructions).toContain("exactly as path:line");
+    expect(repositoryChatInstructions).toContain("Do not use bare filenames");
     expect(repositoryChatSchema.properties.evidenceIds.maxItems).toBe(4);
     expect(repositoryChatSchema.properties.evidenceIds.uniqueItems).toBe(true);
   });
