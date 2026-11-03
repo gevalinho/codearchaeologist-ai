@@ -11,6 +11,8 @@ import type { GitHubRepository } from "./url";
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const FILE = /^[a-f0-9-]{36}\.json$/;
 const ACTIVE = new Set(["validating-repository-url", "preparing-isolated-scanner", "fetching-repository", "scanning-supported-source-files", "generating-architecture-graph", "validating-graph"]);
+export const READY_RETENTION_MS = 24 * 60 * 60_000;
+const MAX_READY_JOBS = 50;
 export type JobOwner = { id: string; nonce: string; installationId?: number; repositoryId?: number };
 export type StoredJob = { status: GitHubJobStatus; repo: GitHubRepository; kind: "public" | "private"; owner?: JobOwner; cancelled: boolean; leaseId: string };
 type Row = { id: unknown; repository: unknown; repo_owner: unknown; repo_name: unknown; kind: unknown; owner_id: unknown; owner_nonce: unknown; installation_id: unknown; repository_id: unknown; status_json: unknown; phase: unknown; created_at: unknown; expires_at: unknown; cancelled: unknown; lease_id: unknown };
@@ -59,10 +61,24 @@ export class SqliteJobStore {
     this.db.prepare("DELETE FROM github_jobs WHERE expires_at <= ?").run(now);
     this.db.prepare("DELETE FROM github_artifacts WHERE expires_at <= ?").run(now);
     for (const row of expired) this.remove(row.file_id);
+    const evicted: string[] = [];
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      const overflow = this.db.prepare("SELECT id FROM github_jobs WHERE phase='ready' ORDER BY expires_at DESC LIMIT -1 OFFSET ?").all(MAX_READY_JOBS) as { id: string }[];
+      for (const row of overflow) {
+        const files = this.db.prepare("SELECT file_id FROM github_artifacts WHERE job_id=?").all(row.id) as { file_id: string }[];
+        if (this.db.prepare("DELETE FROM github_jobs WHERE id=? AND phase='ready' AND (SELECT COUNT(*) FROM github_jobs WHERE phase='ready')>?").run(row.id, MAX_READY_JOBS).changes !== 1) continue;
+        this.db.prepare("DELETE FROM github_artifacts WHERE job_id=?").run(row.id);
+        for (const file of files) evicted.push(file.file_id);
+      }
+      this.db.exec("COMMIT;");
+    } catch (error) { if (this.db.isTransaction) this.db.exec("ROLLBACK;"); throw error; }
+    for (const id of evicted) this.remove(id);
     const referenced = new Set((this.db.prepare("SELECT file_id FROM github_artifacts").all() as { file_id: string }[]).map(row => `${row.file_id}.json`));
     for (const name of readdirSync(this.directory)) if (FILE.test(name) && !referenced.has(name)) rmSync(path.join(this.directory, name), { force: true });
   }
   count(): number { return (this.db.prepare("SELECT COUNT(*) AS count FROM github_jobs").get() as { count: number }).count; }
+  activeCount(): number { return (this.db.prepare("SELECT COUNT(*) AS count FROM github_jobs WHERE phase IN ('validating-repository-url','preparing-isolated-scanner','fetching-repository','scanning-supported-source-files','generating-architecture-graph','validating-graph')").get() as { count: number }).count; }
   active(): boolean { return (this.db.prepare("SELECT COUNT(*) AS count FROM github_jobs WHERE phase IN ('validating-repository-url','preparing-isolated-scanner','fetching-repository','scanning-supported-source-files','generating-architecture-graph','validating-graph')").get() as { count: number }).count > 0; }
   create(status: GitHubJobStatus, repo: GitHubRepository, leaseId: string, owner?: JobOwner, kind: "public" | "private" = owner?.installationId ? "private" : "public"): void {
     this.db.prepare("INSERT INTO github_jobs (id,repository,repo_owner,repo_name,kind,owner_id,owner_nonce,installation_id,repository_id,status_json,phase,created_at,expires_at,cancelled,lease_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?)")
@@ -136,8 +152,11 @@ export class SqliteJobStore {
           const current = this.db.prepare("SELECT 1 FROM scanner_dispatches WHERE job_id=? AND generation=? AND job_lease_id=? AND result_sha256=? AND claim_ack_at IS NOT NULL AND cancelled=0 AND deadline_at>?").get(id, dispatch.generation, leaseId, dispatch.resultSha256, this.now());
           if (!current) throw new Error("Worker result does not match the active dispatch.");
         }
-        for (const row of rows) this.db.prepare("INSERT INTO github_artifacts (job_id,name,file_id,sha256,byte_size,expires_at) VALUES (?,?,?,?,?,?)").run(id, row.name, row.fileId, row.sha, row.size, Date.parse(ready.expiresAt));
+        const expires = Date.parse(ready.expiresAt);
+        if (!Number.isSafeInteger(expires) || expires <= this.now() || expires > this.now() + READY_RETENTION_MS) throw new Error("Ready investigation retention is invalid.");
+        for (const row of rows) this.db.prepare("INSERT INTO github_artifacts (job_id,name,file_id,sha256,byte_size,expires_at) VALUES (?,?,?,?,?,?)").run(id, row.name, row.fileId, row.sha, row.size, expires);
         this.update(id, ready, leaseId);
+        this.db.prepare("UPDATE github_jobs SET expires_at=? WHERE id=? AND lease_id=? AND cancelled=0").run(expires, id, leaseId);
         this.db.exec("COMMIT;");
       } catch (error) { this.db.exec("ROLLBACK;"); throw error; }
     } catch (error) { for (const file of written) rmSync(file, { force: true }); throw error; }

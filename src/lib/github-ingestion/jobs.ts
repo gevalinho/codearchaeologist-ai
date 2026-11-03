@@ -20,7 +20,7 @@ import {
 } from "./app";
 import type { UserSession } from "./session";
 import { GITHUB_RESPONSE_TOO_LARGE_MESSAGE } from "./network";
-import { SqliteJobStore, type JobOwner } from "./job-store";
+import { READY_RETENTION_MS, SqliteJobStore, type JobOwner } from "./job-store";
 import { privateDirectory } from "./state-db";
 import { SCAN_START_LIMIT, SCAN_START_WINDOW_MS, SqliteQuotaStore, type QuotaLease } from "./quota-store";
 import { SqliteDispatchStore, type AcquiredSource } from "./dispatch-store";
@@ -414,9 +414,9 @@ export class GitHubJobManager {
       throw new Error("Production scanner handoff is unavailable.");
     this.sweep();
     const repo = parsePublicGitHubUrl(url);
-    if (this.store.count() >= 3)
+    if (this.store.activeCount() >= 3)
       throw new Error(
-        "Recent analysis capacity is full. Retry after jobs expire.",
+        "Active scan capacity is full. Retry after running scans finish.",
       );
     const quotaLease = this.quota.reserve({
       scope: "scan_start",
@@ -668,6 +668,9 @@ export class GitHubJobManager {
               ...job.status,
               phase: "ready" as const,
               summary: completed.summary,
+              expiresAt: new Date(
+                this.deps.now() + READY_RETENTION_MS,
+              ).toISOString(),
             };
             try {
               const workerState = this.handoff
@@ -929,6 +932,9 @@ export class GitHubJobManager {
         ...job.status,
         phase: "ready" as const,
         summary: completed.summary,
+        expiresAt: new Date(
+          this.deps.now() + READY_RETENTION_MS,
+        ).toISOString(),
       };
       this.store.publish(id, job.leaseId, completed.artifact, ready, {
         generation: state.generation,

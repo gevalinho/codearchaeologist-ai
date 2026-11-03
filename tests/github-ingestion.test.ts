@@ -335,13 +335,19 @@ describe("analysis job lifecycle", () => {
     expect(manager.get(job.id)?.phase).toBe("failed");
     expect(await manager.artifact(job.id, "graph.json")).toBeUndefined();
   });
-  it("bounds new jobs and expires retained artifacts", async () => {
+  it("retains completed jobs without consuming active-scan capacity", async () => {
     let now = Date.now();
     const manager = new GitHubJobManager(dependencies({ now: () => now }));
-    for (let i = 0; i < 3; i++) { const job = manager.create(repoUrl); await manager.wait(job.id); }
-    expect(() => manager.create(repoUrl)).toThrow(/capacity is full/);
-    now += 60 * 60_000 + 1;
+    const retained: string[] = [];
+    for (let i = 0; i < 3; i++) { const job = manager.create(repoUrl); await manager.wait(job.id); retained.push(job.id); }
     const next = manager.create(repoUrl); await manager.wait(next.id);
     expect(manager.get(next.id)?.phase).toBe("ready");
+    now += 24 * 60 * 60_000 + 1;
+    for (const id of [...retained, next.id]) {
+      expect(manager.get(id)).toBeUndefined();
+      expect(await manager.artifact(id, "graph.json")).toBeUndefined();
+    }
+    const fresh = manager.create(repoUrl); await manager.wait(fresh.id);
+    expect(manager.get(fresh.id)?.phase).toBe("ready");
   });
 });

@@ -112,14 +112,17 @@ describe("durable GitHub jobs and private artifacts", () => {
     expect(await manager.artifact(job.id, "manifest.json")).toBeUndefined();
   });
 
-  it("expires jobs and removes orphan files without accepting traversals", async () => {
+  it("retains ready jobs past five minutes, then expires jobs and removes orphan files", async () => {
     let now = Date.now();
     const clock = deps({ now: () => now });
     const manager = new GitHubJobManager(clock), job = manager.create(repo); await manager.wait(job.id);
+    now += 5 * 60_000 + 1;
+    expect(new GitHubJobManager(clock).get(job.id)?.phase).toBe("ready");
+    expect(await manager.artifact(job.id, "graph.json")).toContain(demoGraph.snapshotId);
     const orphan = path.join(artifactDir, `${randomUUID()}.json`); writeFileSync(orphan, "orphan", { mode: 0o600 });
     expect(manager.get("../../secret")).toBeUndefined();
     expect(await manager.artifact("../../secret", "graph.json")).toBeUndefined();
-    now += 5 * 60_000 + 1;
+    now += 24 * 60 * 60_000;
     expect(new GitHubJobManager(clock).get(job.id)).toBeUndefined();
     expect(readdirSync(artifactDir)).toHaveLength(0);
   });
