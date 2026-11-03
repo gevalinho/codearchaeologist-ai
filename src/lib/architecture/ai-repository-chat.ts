@@ -5,8 +5,9 @@ export type RepositoryValidationCategory = "structure" | "classification" | "uns
 export type RepositoryTextField = "answer" | "uncertainty";
 export type RepositoryTextRule = "control_character" | "html_delimiter" | "unsafe_url" | "source_reference";
 export type RepositoryAnswerRule = "citations_present" | "answer_prefix";
+export type RepositoryReferenceFormat = "bare-filename" | "bare-path" | "path-line" | "path-range" | "prefixed-path";
 export class RepositoryAnswerValidationError extends Error {
-  constructor(readonly category: RepositoryValidationCategory, readonly field?: RepositoryTextField, readonly rule?: RepositoryTextRule, readonly answerRule?: RepositoryAnswerRule) { super("Invalid repository answer."); this.name = "RepositoryAnswerValidationError"; }
+  constructor(readonly category: RepositoryValidationCategory, readonly field?: RepositoryTextField, readonly rule?: RepositoryTextRule, readonly answerRule?: RepositoryAnswerRule, readonly referenceFormat?: RepositoryReferenceFormat) { super("Invalid repository answer."); this.name = "RepositoryAnswerValidationError"; }
 }
 const invalid = (category: RepositoryValidationCategory): never => { throw new RepositoryAnswerValidationError(category); };
 const sourceLike = /(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.(?:php|js|jsx|ts|tsx|py|java|cs)(?::\d+(?:-\d+)?)?/gi;
@@ -22,8 +23,12 @@ function validateText(text: string, field: RepositoryTextField, packet: Reposito
   if (/\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.|javascript:|data:|file:)/i.test(text) || /\]\s*\(/.test(text)) reject("unsafe_url");
   for (const match of text.matchAll(sourceLike)) {
     const reference = match[0];
+    const prefixed = (match.index ?? 0) > 0 && /[/\\]/.test(text[(match.index ?? 0) - 1]);
     const matchesReference = (source: { path: string; startLine: number; endLine: number }) => `${source.path}:${source.startLine}${source.endLine === source.startLine ? "" : `-${source.endLine}`}` === reference;
-    if (match.index > 0 && /[/\\]/.test(text[match.index - 1]) || !packet.items.some(item => cited.has(item.id) && [item.source, ...(item.supportingSources ?? [])].some(matchesReference))) reject("source_reference");
+    if (prefixed || !packet.items.some(item => cited.has(item.id) && [item.source, ...(item.supportingSources ?? [])].some(matchesReference))) {
+      const format: RepositoryReferenceFormat = prefixed ? "prefixed-path" : /:\d+-\d+$/.test(reference) ? "path-range" : reference.includes(":") ? "path-line" : reference.includes("/") ? "bare-path" : "bare-filename";
+      throw new RepositoryAnswerValidationError("unsafe_text", field, "source_reference", undefined, format);
+    }
   }
 }
 export const repositoryChatSchema = { type: "object", additionalProperties: false, required: ["schemaVersion", "status", "answer", "evidenceIds", "uncertainty"], properties: { schemaVersion: { type: "string", enum: ["1.0.0"] }, status: { type: "string", enum: ["observed-structure", "inference", "suggestion", "insufficient-evidence"] }, answer: { type: "string", description: "Use exact candidate titles from the packet when naming candidates. Do not claim unsupported behavior." }, evidenceIds: { type: "array", description: "For every named candidate, include that candidate's exact anchor evidence ID. Cite at most four distinct packet item IDs.", maxItems: 4, uniqueItems: true, items: { type: "string" } }, uncertainty: { type: "string" } } };

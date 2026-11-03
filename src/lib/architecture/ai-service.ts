@@ -209,7 +209,16 @@ export function createAiInterpretationHandler(deps: Dependencies) {
       stage = "provider_invocation";
       const response = await provider.complete({ name: repositoryScope ? "repository_chat_v1" : chat ? "feature_chat_v1" : "feature_interpretation_v1", instructions: repositoryScope ? repositoryChatInstructions : chat ? aiChatInstructions : aiInstructions, input: JSON.stringify(chat ? { packet, question, history } : packet), schema: repositoryScope ? repositoryChatSchema : chat ? aiChatSchema : aiInterpretationSchema, maxOutputTokens: interpretationOutputTokens(deps.maxOutputTokens), signal: AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]) });
       stage = "response_validation";
-      if ("scope" in packet) return json({ scope: "repository", snapshotId: packet.snapshotId, answer: parseRepositoryAnswer(response.value, packet) }, 200);
+      if ("scope" in packet) {
+        try {
+          return json({ scope: "repository", snapshotId: packet.snapshotId, answer: parseRepositoryAnswer(response.value, packet) }, 200);
+        } catch (cause) {
+          if (!(cause instanceof RepositoryAnswerValidationError)) throw cause;
+          const failed = [cause.category, cause.field, cause.rule, cause.answerRule].filter(part => typeof part === "string").join(", ");
+          const retry = await provider.complete({ name: "repository_chat_v1_retry", instructions: `${repositoryChatInstructions} Previous response rejected (${failed}): regenerate the complete JSON answer in strict compliance, citing only submitted evidence IDs and writing source references exactly as path:line from cited items.`, input: JSON.stringify({ packet, question, history }), schema: repositoryChatSchema, maxOutputTokens: interpretationOutputTokens(deps.maxOutputTokens), signal: AbortSignal.any([request.signal, AbortSignal.timeout(30_000)]) });
+          return json({ scope: "repository", snapshotId: packet.snapshotId, answer: parseRepositoryAnswer(retry.value, packet) }, 200);
+        }
+      }
       if (chat) return json({ featureId: packet.featureId, snapshotId: packet.snapshotId, answer: parseChatAnswer(response.value, packet) }, 200);
       return json({ featureId: packet.featureId, snapshotId: packet.snapshotId, interpretation: parseAiInterpretation(response.value, packet) }, 200);
     } catch (cause) {
@@ -219,7 +228,7 @@ export function createAiInterpretationHandler(deps: Dependencies) {
       const finishReason = cause instanceof ModelProviderError && ["stop", "length", "content_filter", "tool_calls"].includes(cause.diagnostics?.finishReason ?? "") ? cause.diagnostics?.finishReason : undefined;
       const outputTokens = cause instanceof ModelProviderError && Number.isSafeInteger(cause.diagnostics?.outputTokens) && (cause.diagnostics?.outputTokens ?? 0) >= 0 && (cause.diagnostics?.outputTokens ?? 0) <= 100_000 ? cause.diagnostics?.outputTokens : undefined;
       const reasoningTokens = cause instanceof ModelProviderError && Number.isSafeInteger(cause.diagnostics?.reasoningTokens) && (cause.diagnostics?.reasoningTokens ?? 0) >= 0 && (cause.diagnostics?.reasoningTokens ?? 0) <= 100_000 ? cause.diagnostics?.reasoningTokens : undefined;
-      return json({ error: "AI interpretation could not complete. Check provider configuration or retry later.", diagnostic: { category, ...(cause instanceof RepositoryAnswerValidationError ? { validationCategory: cause.category, ...(cause.field ? { field: cause.field } : {}), ...(cause.rule ? { rule: cause.rule } : {}) } : {}), ...(upstreamStatus ? { upstreamStatus } : {}), ...(finishReason ? { finishReason } : {}), ...(outputTokens !== undefined ? { outputTokens } : {}), ...(reasoningTokens !== undefined ? { reasoningTokens } : {}) } }, 503);
+      return json({ error: "AI interpretation could not complete. Check provider configuration or retry later.", diagnostic: { category, ...(cause instanceof RepositoryAnswerValidationError ? { validationCategory: cause.category, ...(cause.field ? { field: cause.field } : {}), ...(cause.rule ? { rule: cause.rule } : {}), ...(cause.referenceFormat ? { referenceFormat: cause.referenceFormat } : {}) } : {}), ...(upstreamStatus ? { upstreamStatus } : {}), ...(finishReason ? { finishReason } : {}), ...(outputTokens !== undefined ? { outputTokens } : {}), ...(reasoningTokens !== undefined ? { reasoningTokens } : {}) } }, 503);
     }
     finally {
       active = false;

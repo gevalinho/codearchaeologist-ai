@@ -161,13 +161,16 @@ describe("repository-wide AI evidence", () => {
   });
 
   it("returns only a safe repository validation category while feature interpretation stays independent", async () => {
-    const packet = repo(), provider = new MockModelProvider([{ schemaVersion: "1.0.0", status: "inference", answer: "Unsupported purpose", evidenceIds: ["invented"], uncertainty: "Unknown." }]);
+    const packet = repo(), bad = { schemaVersion: "1.0.0", status: "inference", answer: "Unsupported purpose", evidenceIds: ["invented"], uncertainty: "Unknown." };
+    const provider = new MockModelProvider([bad, bad]);
     const response = await handler(provider)(request({ packet, consent: true, question: "What is this?", history: [] }));
     expect(response.status).toBe(503);
     const body = await response.json();
     expect(body.diagnostic).toEqual({ category: "invalid_interpretation", validationCategory: "citation_unknown" });
     expect(JSON.stringify(body)).not.toContain("invented");
     expect(provider.requests[0].name).toBe("repository_chat_v1");
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests[1].name).toBe("repository_chat_v1_retry");
   });
 
   it("accepts legitimate structural prose, safe emphasis, and an exact cited source reference", () => {
@@ -182,11 +185,52 @@ describe("repository-wide AI evidence", () => {
     const answer = { schemaVersion: "1.0.0", status: "observed-structure", answer: "The controllers/models structure is visible in analyzed files.", evidenceIds: [cited.id], uncertainty: "Runtime behavior remains unverified." };
     expect(parseRepositoryAnswer(answer, packet)).toEqual(answer);
     const invalid = { ...answer, uncertainty: "Review app/controllers/Invented.php:999 before concluding." };
-    const response = await handler(new MockModelProvider([invalid]))(request({ packet, consent: true, question: "What is visible?", history: [] }));
+    const provider = new MockModelProvider([invalid, invalid]);
+    const response = await handler(provider)(request({ packet, consent: true, question: "What is visible?", history: [] }));
     expect(response.status).toBe(503);
     const body = await response.json();
-    expect(body.diagnostic).toEqual({ category: "invalid_interpretation", validationCategory: "unsafe_text", field: "uncertainty", rule: "source_reference" });
+    expect(body.diagnostic).toEqual({ category: "invalid_interpretation", validationCategory: "unsafe_text", field: "uncertainty", rule: "source_reference", referenceFormat: "path-line" });
     expect(JSON.stringify(body)).not.toContain("Invented.php");
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests[1].instructions).toContain("rejected (unsafe_text, uncertainty, source_reference)");
+  });
+
+  it("retries once with validation feedback and returns the corrected repository answer", async () => {
+    const packet = repo(), cited = packet.items[0];
+    const invalid = { schemaVersion: "1.0.0", status: "observed-structure", answer: "Requests enter through index.php routing.", evidenceIds: [cited.id], uncertainty: "Runtime behavior is unverified." };
+    const valid = { schemaVersion: "1.0.0", status: "observed-structure", answer: `The represented controller handles requests; see ${cited.source.path}:${cited.source.startLine}.`, evidenceIds: [cited.id], uncertainty: "Runtime behavior is unverified." };
+    const provider = new MockModelProvider([invalid, valid]);
+    const response = await handler(provider)(request({ packet, consent: true, question: "What handles requests?", history: [] }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ scope: "repository", snapshotId: packet.snapshotId, answer: valid });
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests[0].name).toBe("repository_chat_v1");
+    expect(provider.requests[1].name).toBe("repository_chat_v1_retry");
+    expect(provider.requests[1].instructions).toContain(repositoryChatInstructions);
+    expect(provider.requests[1].instructions).toContain("rejected (unsafe_text, answer, source_reference)");
+  });
+
+  it("classifies rejected reference formats without exposing reference contents", () => {
+    const packet = repo(), cited = packet.items[0];
+    const base = { schemaVersion: "1.0.0", status: "observed-structure", evidenceIds: [cited.id], uncertainty: "Runtime behavior is unverified." };
+    const cases = [
+      ["Requests enter through index.php routing.", "bare-filename"],
+      ["See system/core/CodeIgniter.php for the bootstrap sequence.", "bare-path"],
+      ["See application/controllers/Invented.php:42 for details.", "path-line"],
+      ["See application/controllers/Invented.php:42-50 for details.", "path-range"],
+      [`See /${cited.source.path}:${cited.source.startLine} for details.`, "prefixed-path"],
+    ] as const;
+    for (const [text, referenceFormat] of cases) {
+      try {
+        parseRepositoryAnswer({ ...base, answer: text }, packet);
+        throw new Error("Expected text rejection");
+      } catch (cause) {
+        expect(cause).toBeInstanceOf(RepositoryAnswerValidationError);
+        expect(cause).toMatchObject({ category: "unsafe_text", field: "answer", rule: "source_reference", referenceFormat });
+        expect(JSON.stringify(cause)).not.toContain("Invented.php");
+        expect(JSON.stringify(cause)).not.toContain("CodeIgniter.php");
+      }
+    }
   });
 
   it("rejects unsafe HTML, URLs, uncited source references, and invalid citation IDs", () => {
