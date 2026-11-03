@@ -8,7 +8,7 @@ import { ModelProviderError } from "../src/lib/ai/model-provider";
 import { QuotaExceeded, type SqliteQuotaStore } from "../src/lib/github-ingestion/quota-store";
 import { createEvidencePacket, parseEvidencePacket, type EvidenceOrigin } from "../src/lib/architecture/ai-evidence";
 import { parseAiInterpretation, parseAiResponseEnvelope } from "../src/lib/architecture/ai-interpretation";
-import { parseChatAnswer, parseChatHistory } from "../src/lib/architecture/ai-chat";
+import { aiChatInstructions, parseChatAnswer, parseChatHistory } from "../src/lib/architecture/ai-chat";
 import { allowDevelopmentAi, createAiInterpretationHandler, interpretationOutputTokens } from "../src/lib/architecture/ai-service";
 import { investigateFeature, studentPromotionFeature } from "../src/lib/architecture/features";
 import { planReconstruction } from "../src/lib/architecture/reconstruction-planner";
@@ -156,6 +156,23 @@ describe("evidence-grounded interpretation", () => {
     expect(() => parseChatAnswer({ ...answer, evidenceIds: ["invented"] }, evidence)).toThrow();
     expect(() => parseChatAnswer({ ...answer, evidenceIds: [] }, evidence)).toThrow();
     expect(() => parseChatAnswer({ ...answer, answer: "Insufficient evidence to determine this.", evidenceIds: [] }, evidence)).not.toThrow();
+  });
+
+  it("rejects invented source references in chat answers while allowing ordinary slash phrases", async () => {
+    const evidence = packet();
+    const base = { schemaVersion: "1.0.0", answer: "A validation pattern was observed.", evidenceIds: [evidence.items[0].id], uncertainty: "The actual method body was not reviewed." };
+    expect(() => parseChatAnswer({ ...base, answer: "See application/controllers/OrderController.php:4 for details." }, evidence)).toThrow("Invalid chat answer or citations.");
+    expect(() => parseChatAnswer({ ...base, answer: "The OrderController.php file handles orders." }, evidence)).toThrow("Invalid chat answer or citations.");
+    expect(() => parseChatAnswer({ ...base, uncertainty: "Check application/helpers/Billing.php:9 next." }, evidence)).toThrow("Invalid chat answer or citations.");
+    expect(() => parseChatAnswer({ ...base, answer: "Controllers/models and input/output handling appear related." }, evidence)).not.toThrow();
+    expect(aiChatInstructions).toContain("Do not repeat the packet or its references.");
+    const provider = new MockModelProvider([{ ...base, answer: "See application/controllers/Invented.php:99 for details." }]);
+    const handle = createAiInterpretationHandler({ enabled: true, origin: "https://app.example", developmentAccess: true, createProvider: () => provider, privateAuthorized: () => false, now: () => 20_000 });
+    const response = await handle(request({ packet: evidence, consent: true, question: "What is supported?", history: [] }, { "x-codearchaeologist-ai-access-key": "" }));
+    expect(response.status).toBe(503);
+    const body = await response.json();
+    expect(body.diagnostic).toEqual({ category: "invalid_interpretation" });
+    expect(JSON.stringify(body)).not.toContain("Invented.php");
   });
 
   it("rejects malformed chat history and keeps an unconfigured deployment closed", async () => {
