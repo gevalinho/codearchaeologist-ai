@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 vi.mock("server-only", () => ({}));
-import { acknowledgedClaim, claimDispatch, cleanupWebSpool, cleanupWorkerSpool, dispatchSkipReason, inspectPendingDispatch, isCancelled, markCancelled, publishClaimAcknowledgement, publishResult, publishSnapshot, publishWorkerHeartbeat, readClaimReceipt, readResult, readWorkerHeartbeat, validId, type SpoolOwners, type SpoolRoots } from "../src/lib/github-ingestion/spool";
+import { acknowledgedClaim, claimDispatch, cleanupWebSpool, cleanupWorkerSpool, dispatchSkipReason, inspectPendingDispatch, isCancelled, markCancelled, publishClaimAcknowledgement, publishResult, publishSnapshot, publishWorkerFailure, publishWorkerHeartbeat, readClaimReceipt, readResult, readWorkerFailure, readWorkerHeartbeat, validId, WORKER_FAILURE_CATEGORIES, type SpoolOwners, type SpoolRoots } from "../src/lib/github-ingestion/spool";
 
 let root: string, roots: SpoolRoots, owners: SpoolOwners;
 const id = () => randomUUID();
@@ -186,5 +186,39 @@ describe("dispatcher preflight skip reasons", () => {
     expect(reasonOf(future, futureGeneration)).toBe("invalid");
     expect(dispatchSkipReason(new Error("boom"))).toBe("invalid");
     expect(dispatchSkipReason(null)).toBe("invalid");
+  });
+});
+
+describe("worker failure records", () => {
+  it("publishes one fixed category per claimed attempt and reads it back", () => {
+    expect([...WORKER_FAILURE_CATEGORIES]).toEqual(["cancelled", "snapshot-integrity", "docker-unavailable", "scan-failed", "scan-timeout", "result-rejected", "cleanup-unconfirmed", "internal"]);
+    const job = id(), generation = id();
+    publishSnapshot(roots, owners, job, generation, source(), Date.now() + 60_000);
+    claimDispatch(roots, owners, job, generation);
+    expect(() => readWorkerFailure(roots, owners, job, generation)).toThrow(/ENOENT/);
+    publishWorkerFailure(roots, owners, job, generation, "scan-timeout");
+    expect(readWorkerFailure(roots, owners, job, generation)).toMatchObject({ version: 1, jobId: job, generation, category: "scan-timeout" });
+    expect(() => publishWorkerFailure(roots, owners, job, generation, "internal")).toThrow();
+    cleanupWorkerSpool(roots, owners, job, generation);
+    expect(() => readWorkerFailure(roots, owners, job, generation)).toThrow(/ENOENT/);
+  });
+
+  it("rejects unclaimed, cancelled, stale, and tampered failure records", () => {
+    const job = id(), generation = id();
+    publishSnapshot(roots, owners, job, generation, source(), Date.now() + 60_000);
+    expect(() => publishWorkerFailure(roots, owners, job, generation, "internal")).toThrow();
+    claimDispatch(roots, owners, job, generation);
+    expect(() => publishWorkerFailure(roots, owners, job, generation, "not-a-category" as never)).toThrow(/Invalid worker failure category/);
+    markCancelled(roots, owners, job, generation);
+    expect(() => publishWorkerFailure(roots, owners, job, generation, "internal")).toThrow(/stale or cancelled/);
+    expect(() => readWorkerFailure(roots, owners, job, generation)).toThrow(/stale or cancelled/);
+    const tampered = id(), tamperedGeneration = id();
+    publishSnapshot(roots, owners, tampered, tamperedGeneration, source(), Date.now() + 60_000);
+    claimDispatch(roots, owners, tampered, tamperedGeneration);
+    publishWorkerFailure(roots, owners, tampered, tamperedGeneration, "internal");
+    writeFileSync(path.join(roots.outbox, `${tampered}.${tamperedGeneration}.failure`), JSON.stringify({ version: 1, jobId: tampered, generation: tamperedGeneration, category: "internal", at: Date.now(), extra: true }));
+    expect(() => readWorkerFailure(roots, owners, tampered, tamperedGeneration)).toThrow(/Invalid worker failure record/);
+    writeFileSync(path.join(roots.outbox, `${tampered}.${tamperedGeneration}.failure`), JSON.stringify({ version: 1, jobId: tampered, generation: tamperedGeneration, category: "hacked", at: Date.now() }));
+    expect(() => readWorkerFailure(roots, owners, tampered, tamperedGeneration)).toThrow(/Invalid worker failure record/);
   });
 });

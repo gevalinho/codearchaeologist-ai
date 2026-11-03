@@ -34,10 +34,24 @@ import {
   readClaimReceipt,
   readResult,
   readSnapshotManifest,
+  readWorkerFailure,
   readWorkerHeartbeat,
   type SpoolOwners,
   type SpoolRoots,
+  type WorkerFailureCategory,
 } from "./spool";
+
+/** Fixed terminal messages for worker failure categories. Only these strings surface; record contents never do. */
+const WORKER_FAILURE_TERMINAL: Record<WorkerFailureCategory, string> = {
+  cancelled: "Worker dispatch expired or was cancelled during execution.",
+  "snapshot-integrity": "Worker snapshot verification failed.",
+  "docker-unavailable": "Isolated scanner was unavailable.",
+  "scan-failed": "Isolated scanner failed.",
+  "scan-timeout": "Isolated scanner exceeded its time limit.",
+  "result-rejected": "Worker result was rejected.",
+  "cleanup-unconfirmed": "Isolated scanner cleanup could not be confirmed.",
+  internal: "Worker exited unsuccessfully.",
+};
 
 export const REPOSITORY_SIZE_LIMIT_MESSAGE = "Repository exceeds the analysis size limit. This repository contains more data than CodeArchaeologist AI can safely retrieve in a single investigation. Try analyzing a smaller repository or preparing a reduced copy containing the source files you want to investigate.";
 
@@ -275,6 +289,17 @@ export class GitHubJobManager {
           )
             throw new Error("Worker result is stale or duplicated.");
           return { output, generation, resultSha256 };
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        try {
+          const failure = readWorkerFailure(
+            this.handoff.roots,
+            this.handoff.owners,
+            job.status.id,
+            generation,
+          );
+          throw new Error(WORKER_FAILURE_TERMINAL[failure.category]);
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
@@ -891,6 +916,18 @@ export class GitHubJobManager {
         output = "";
       }
       if (!output) {
+        try {
+          const failure = readWorkerFailure(
+            this.handoff.roots,
+            this.handoff.owners,
+            id,
+            state.generation,
+          );
+          fail(WORKER_FAILURE_TERMINAL[failure.category]);
+          return;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
         try {
           const beat = readWorkerHeartbeat(
             this.handoff.roots,

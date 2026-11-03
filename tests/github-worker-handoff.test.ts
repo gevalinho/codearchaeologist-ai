@@ -14,6 +14,7 @@ import {
   claimDispatch,
   isCancelled,
   publishResult,
+  publishWorkerFailure,
   publishWorkerHeartbeat,
   readClaimReceipt,
   type SpoolOwners,
@@ -140,7 +141,7 @@ function deps(): JobDependencies {
 function mockWorker(
   jobId: string,
   generation: string,
-  stage: "claim" | "result" | "crash",
+  stage: "claim" | "result" | "crash" | "failure",
   output = JSON.stringify(handoffGraph),
 ) {
   if (stage === "claim") {
@@ -155,6 +156,10 @@ function mockWorker(
       generation,
       Date.now() - 20_000,
     );
+    return;
+  }
+  if (stage === "failure") {
+    publishWorkerFailure(roots, owners, jobId, generation, "scan-timeout");
     return;
   }
   const receipt = readClaimReceipt(roots, owners, jobId, generation);
@@ -259,6 +264,27 @@ describe("web to worker dispatch", () => {
     await manager.wait(job.id);
     expect(manager.get(job.id, user)?.phase).toBe("failed");
   });
+
+  it("fails fast with a terminal message on a worker failure record", async () => {
+    let jobId = "",
+      stage = 0;
+    handoff.poll = async () => {
+      const state = new SqliteDispatchStore(process.env.CODEARCH_DB_PATH!);
+      const current = state.get(jobId);
+      state.close();
+      if (!current) return;
+      if (stage++ === 0) mockWorker(jobId, current.generation, "claim");
+      else if (stage === 2) mockWorker(jobId, current.generation, "failure");
+    };
+    const manager = new GitHubJobManager(deps(), undefined, handoff);
+    const job = await manager.createPrivate(user, 7, 11);
+    jobId = job.id;
+    await manager.wait(job.id);
+    expect(manager.get(job.id, user)?.phase).toBe("failed");
+    expect(manager.get(job.id, user)?.error).toBe(
+      "Isolated scanner exceeded its time limit.",
+    );
+  });
 });
 
 describe("restart reconciliation authorization", () => {
@@ -306,6 +332,17 @@ describe("restart reconciliation authorization", () => {
     claimDispatch(roots, owners, job.id, dispatch.generation);
     const check = kind === "missing" ? async () => null : kind === "mismatched" ? async () => ({ ...user, nonce: "different" }) : async () => ({ ...user, expiresAt: Date.now() - 1 });
     expect(await recovered.authorizedStatus(job.id, user, check)).toBeUndefined();
+    expect(await recovered.artifact(job.id, "graph.json", user)).toBeUndefined();
+  });
+
+  it("fails fast with a terminal message when restart finds a worker failure record", async () => {
+    const { job, dispatch, recovered } = await interruptedJob();
+    claimDispatch(roots, owners, job.id, dispatch.generation);
+    await recovered.authorizedStatus(job.id, user, session);
+    publishWorkerFailure(roots, owners, job.id, dispatch.generation, "scan-failed");
+    const status = await recovered.authorizedStatus(job.id, user, session);
+    expect(status?.phase).toBe("failed");
+    expect(status?.error).toBe("Isolated scanner failed.");
     expect(await recovered.artifact(job.id, "graph.json", user)).toBeUndefined();
   });
 

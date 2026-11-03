@@ -108,6 +108,7 @@ function resultPath(roots: SpoolRoots, jobId: string, generation: string): strin
 function receiptPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.outbox, `${name(jobId, generation)}.claim`); }
 function acknowledgementPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.inbox, `${name(jobId, generation)}.ack`); }
 function heartbeatPath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.outbox, `${name(jobId, generation)}.heartbeat`); }
+function failurePath(roots: SpoolRoots, jobId: string, generation: string): string { return path.join(roots.outbox, `${name(jobId, generation)}.failure`); }
 
 function current(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): boolean {
   try { return readSafe(activePath(roots, jobId), 64, owners.webUid, owners.inboxGid).toString("ascii") === generation; } catch { return false; }
@@ -279,6 +280,30 @@ export function readWorkerHeartbeat(roots: SpoolRoots, owners: SpoolOwners, jobI
   return value.at as number;
 }
 
+/** Fixed allowlist of worker terminal-failure categories. Single source of truth for the failure record, worker exit codes, dispatcher outcomes, and web terminal messages. */
+export const WORKER_FAILURE_CATEGORIES = ["cancelled", "snapshot-integrity", "docker-unavailable", "scan-failed", "scan-timeout", "result-rejected", "cleanup-unconfirmed", "internal"] as const;
+export type WorkerFailureCategory = (typeof WORKER_FAILURE_CATEGORIES)[number];
+export type WorkerFailure = { version: 1; jobId: string; generation: string; category: WorkerFailureCategory; at: number };
+function validFailureCategory(value: unknown): value is WorkerFailureCategory { return typeof value === "string" && (WORKER_FAILURE_CATEGORIES as readonly string[]).includes(value); }
+
+/** Worker publishes one terminal failure category after a claimed attempt fails. Additive protocol file: readers that do not know it keep heartbeat-expiry behavior. Requires the claim but not the acknowledgement, since failures can predate it. */
+export function publishWorkerFailure(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string, category: WorkerFailureCategory, at = Date.now()): void {
+  validateSpoolRoots(roots, owners); actor(owners.workerUid); name(jobId, generation);
+  directory(claimPath(roots, jobId, generation), owners.workerUid, owners.workerGid, false);
+  if (isCancelled(roots, owners, jobId, generation)) throw new Error("Worker failure is stale or cancelled.");
+  if (!validFailureCategory(category) || !Number.isSafeInteger(at)) throw new Error("Invalid worker failure category.");
+  publishFile(roots.outbox, failurePath(roots, jobId, generation), Buffer.from(JSON.stringify({ version: 1, jobId, generation, category, at })), 0o640);
+}
+
+/** Web reads the worker-owned failure record for a fast terminal failure instead of waiting for heartbeat expiry. */
+export function readWorkerFailure(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): WorkerFailure {
+  validateSpoolRoots(roots, owners); actor(owners.webUid); name(jobId, generation);
+  if (isCancelled(roots, owners, jobId, generation)) throw new Error("Worker failure is stale or cancelled.");
+  const value = parseJson(readSafe(failurePath(roots, jobId, generation), DISPATCH_LIMIT, owners.workerUid, owners.outboxGid));
+  if (!record(value) || !exact(value, "at,category,generation,jobId,version") || value.version !== 1 || value.jobId !== jobId || value.generation !== generation || !validFailureCategory(value.category) || !Number.isSafeInteger(value.at)) throw new Error("Invalid worker failure record.");
+  return value as WorkerFailure;
+}
+
 export function markCancelled(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string): void {
   validateSpoolRoots(roots, owners); actor(owners.webUid); name(jobId, generation);
   const marker = cancelledPath(roots, jobId, generation);
@@ -338,5 +363,6 @@ export function cleanupWorkerSpool(roots: SpoolRoots, owners: SpoolOwners, jobId
   const result = resultPath(roots, jobId, generation); if (statExists(result)) { readSafe(result, RESULT_LIMIT, owners.workerUid, owners.outboxGid); unlinkSync(result); }
   const receipt = receiptPath(roots, jobId, generation); if (statExists(receipt)) { readSafe(receipt, DISPATCH_LIMIT, owners.workerUid, owners.outboxGid); unlinkSync(receipt); }
   const heartbeat = heartbeatPath(roots, jobId, generation); if (statExists(heartbeat)) { readSafe(heartbeat, DISPATCH_LIMIT, owners.workerUid, owners.outboxGid); unlinkSync(heartbeat); }
+  const failure = failurePath(roots, jobId, generation); if (statExists(failure)) { readSafe(failure, DISPATCH_LIMIT, owners.workerUid, owners.outboxGid); unlinkSync(failure); }
   fsyncDirectory(roots.claims); fsyncDirectory(roots.outbox);
 }

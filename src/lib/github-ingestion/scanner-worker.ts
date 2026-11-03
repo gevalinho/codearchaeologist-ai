@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { DEFAULT_SCAN_LIMITS } from "../archaeology/selection";
-import { acknowledgedClaim, claimDispatch, isCancelled, publishResult, publishWorkerHeartbeat, validId, validateSpoolRoots, type SnapshotManifest, type SpoolOwners, type SpoolRoots } from "./spool";
+import { acknowledgedClaim, claimDispatch, isCancelled, publishResult, publishWorkerFailure, publishWorkerHeartbeat, validId, validateSpoolRoots, type SnapshotManifest, type SpoolOwners, type SpoolRoots, type WorkerFailureCategory } from "./spool";
 import { runIsolatedScanner, scannerAvailable } from "./sandbox";
 
 export type WorkerConfig = { roots: SpoolRoots; owners: SpoolOwners; scanRoot: string };
@@ -61,6 +61,80 @@ export function copyVerifiedSnapshot(snapshot: string, manifest: SnapshotManifes
     if (total !== manifest.totalBytes) throw new Error("Source snapshot byte count changed.");
     return runRoot;
   } catch (error) { rmSync(runRoot, { recursive: true, force: true }); throw error; }
+}
+
+/** Worker process exit codes by failure category. 0 is success; unknown codes mean internal. */
+export const WORKER_EXIT_CODES: Record<WorkerFailureCategory, number> = { cancelled: 2, "snapshot-integrity": 3, "docker-unavailable": 4, "scan-failed": 5, "scan-timeout": 6, "result-rejected": 7, "cleanup-unconfirmed": 8, internal: 1 };
+const categoryByExitCode = new Map<number, WorkerFailureCategory>(Object.entries(WORKER_EXIT_CODES).map(([category, code]) => [code, category as WorkerFailureCategory]));
+export function workerCategoryFromExitCode(code: number | null): WorkerFailureCategory { return code === null ? "internal" : (categoryByExitCode.get(code) ?? "internal"); }
+
+/**
+ * Classify a worker error into the fixed failure allowlist by exact match on
+ * known fixed literals. System errors (which embed paths) and unknown errors
+ * fall through to internal, so classification can never leak sensitive text.
+ * "Invalid, stale, or cancelled dispatch." conflates claim causes by design;
+ * it maps to cancelled, the routine production case.
+ */
+const categoryByMessage = new Map<string, WorkerFailureCategory>([
+  ["Scanner dispatch expired or was cancelled before acknowledgement.", "cancelled"],
+  ["Scanner dispatch expired or was cancelled during preparation.", "cancelled"],
+  ["Scanner dispatch expired or was cancelled before execution.", "cancelled"],
+  ["Scanner dispatch expired or was cancelled during execution.", "cancelled"],
+  ["GitHub analysis cancelled.", "cancelled"],
+  ["Dispatch cancelled during claim.", "cancelled"],
+  ["Result is stale or cancelled.", "cancelled"],
+  ["Invalid, stale, or cancelled dispatch.", "cancelled"],
+  ["Snapshot manifest integrity failed.", "snapshot-integrity"],
+  ["Snapshot contains a symlink.", "snapshot-integrity"],
+  ["Snapshot contains an unexpected entry.", "snapshot-integrity"],
+  ["Snapshot is incomplete.", "snapshot-integrity"],
+  ["Invalid snapshot manifest.", "snapshot-integrity"],
+  ["Invalid snapshot file record.", "snapshot-integrity"],
+  ["Snapshot byte count mismatch.", "snapshot-integrity"],
+  ["Source snapshot integrity failed.", "snapshot-integrity"],
+  ["Source snapshot changed after claim.", "snapshot-integrity"],
+  ["Source snapshot exceeds byte limit.", "snapshot-integrity"],
+  ["Source snapshot byte count changed.", "snapshot-integrity"],
+  ["Invalid claim acknowledgement.", "snapshot-integrity"],
+  ["Unsafe source snapshot root.", "snapshot-integrity"],
+  ["Unsafe source directory.", "snapshot-integrity"],
+  ["Unsafe source file.", "snapshot-integrity"],
+  ["Unsafe spool file.", "snapshot-integrity"],
+  ["Malformed spool record.", "snapshot-integrity"],
+  ["Invalid spool identifier.", "snapshot-integrity"],
+  ["Unsafe spool directory permissions.", "internal"],
+  ["Spool writer identity mismatch.", "internal"],
+  ["Spool roots must be distinct.", "internal"],
+  ["Invalid spool root.", "internal"],
+  ["Worker identity mismatch.", "internal"],
+  ["Invalid worker scan root.", "internal"],
+  ["Worker scan root must be private.", "internal"],
+  ["Scanner worker environment contains web or provider credentials.", "internal"],
+  ["Isolated scanner unavailable: production worker identity is not verified.", "docker-unavailable"],
+  ["Isolated scanner unavailable: invalid rootless Docker configuration.", "docker-unavailable"],
+  ["Isolated scanner unavailable: Docker daemon cannot be reached.", "docker-unavailable"],
+  ["Isolated scanner unavailable: Docker security options are unreadable.", "docker-unavailable"],
+  ["Isolated scanner unavailable: Docker does not report seccomp support.", "docker-unavailable"],
+  ["Isolated scanner unavailable: trusted local Node image is missing.", "docker-unavailable"],
+  ["Isolated scanner unavailable: Docker seccomp enforcement could not be verified. Enable the built-in profile for scanner containers.", "docker-unavailable"],
+  ["Invalid scanner image identity.", "docker-unavailable"],
+  ["Isolated scanner failed. Check Docker availability and scanner limits.", "scan-failed"],
+  ["Isolated scanner exceeded its 30-second limit.", "scan-timeout"],
+  ["Claim is not acknowledged.", "result-rejected"],
+  ["Scanner result exceeds limit.", "result-rejected"],
+  ["Scanner result envelope exceeds limit.", "result-rejected"],
+  ["Isolated scanner cleanup could not be confirmed.", "cleanup-unconfirmed"],
+]);
+export function classifyWorkerFailure(error: unknown): WorkerFailureCategory {
+  if (error instanceof Error) return categoryByMessage.get(error.message) ?? "internal";
+  return "internal";
+}
+
+/** Best-effort terminal failure publication. Never throws and never logs; the exit code still carries the category when publication is impossible. */
+export function reportWorkerFailure(config: WorkerConfig, jobId: string, generation: string, error: unknown): WorkerFailureCategory {
+  const category = classifyWorkerFailure(error);
+  try { publishWorkerFailure(config.roots, config.owners, jobId, generation, category); } catch { /* Terminal diagnostics only. */ }
+  return category;
 }
 
 /** One dispatch attempt only. A persisted claim is never removed or retried by this runtime. */

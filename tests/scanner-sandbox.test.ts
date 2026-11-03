@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const { spawnMock } = vi.hoisted(() => ({
   spawnMock: vi.fn(),
@@ -13,7 +16,9 @@ vi.mock("node:child_process", () => ({
 
 import {
   dockerCommand,
+  runIsolatedScanner,
   scannerDockerEnvironment,
+  type DockerCommand,
 } from "../src/lib/github-ingestion/sandbox";
 
 const originalEnv = { ...process.env };
@@ -179,5 +184,81 @@ describe("production rootless Docker configuration", () => {
     expect(result.GITHUB_TOKEN).toBeUndefined();
     expect(result.BASETEN_API_KEY).toBeUndefined();
     expect(result.DATABASE_URL).toBeUndefined();
+  });
+});
+
+describe("isolated scanner failure modes", () => {
+  const image = `sha256:${"c".repeat(64)}`;
+  const signal = new AbortController().signal;
+  const absent: DockerCommand = async (args) =>
+    args[0] === "container"
+      ? { exitCode: 0, stdout: "", timedOut: false, failed: false }
+      : { exitCode: 0, stdout: "{}", timedOut: false, failed: false };
+  const stagedRoot = () => mkdtempSync(path.join(tmpdir(), "codearch-scan-failure-"));
+
+  it("rejects an invalid image identity without staging a runner", async () => {
+    await expect(runIsolatedScanner("/nonexistent", "node:latest", signal, absent)).rejects.toThrow(
+      "Invalid scanner image identity.",
+    );
+  });
+
+  it("reports a scan timeout with fixed text", async () => {
+    const root = stagedRoot();
+    try {
+      const execute: DockerCommand = async (args) =>
+        args[0] === "container"
+          ? { exitCode: 0, stdout: "", timedOut: false, failed: false }
+          : { exitCode: null, stdout: "", timedOut: true, failed: false };
+      await expect(runIsolatedScanner(root, image, signal, execute)).rejects.toThrow(
+        "Isolated scanner exceeded its 30-second limit.",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a failed scan with fixed text", async () => {
+    const root = stagedRoot();
+    try {
+      const execute: DockerCommand = async (args) =>
+        args[0] === "container"
+          ? { exitCode: 0, stdout: "", timedOut: false, failed: false }
+          : { exitCode: 1, stdout: "", timedOut: false, failed: false };
+      await expect(runIsolatedScanner(root, image, signal, execute)).rejects.toThrow(
+        "Isolated scanner failed. Check Docker availability and scanner limits.",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an unconfirmed container cleanup with fixed text", async () => {
+    const root = stagedRoot();
+    try {
+      const execute: DockerCommand = async (args) =>
+        args[0] === "rm"
+          ? { exitCode: 0, stdout: "", timedOut: false, failed: false }
+          : args[0] === "container"
+            ? { exitCode: 0, stdout: "codearchaeologist-scan-lingering", timedOut: false, failed: false }
+            : { exitCode: 0, stdout: "{}", timedOut: false, failed: false };
+      await expect(runIsolatedScanner(root, image, signal, execute)).rejects.toThrow(
+        "Isolated scanner cleanup could not be confirmed.",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a cancelled scan before reporting output", async () => {
+    const root = stagedRoot();
+    try {
+      const controller = new AbortController();
+      controller.abort();
+      await expect(runIsolatedScanner(root, image, controller.signal, absent)).rejects.toThrow(
+        "GitHub analysis cancelled.",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

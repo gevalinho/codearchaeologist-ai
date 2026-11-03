@@ -16,7 +16,9 @@ import {
   type DispatchSkipReason,
   type SpoolOwners,
   type SpoolRoots,
+  type WorkerFailureCategory,
 } from "./spool";
+import { workerCategoryFromExitCode } from "./scanner-worker";
 
 export type DispatcherConfig = {
   roots: SpoolRoots;
@@ -47,53 +49,76 @@ const marker =
  */
 export const MIN_LAUNCH_REMAINING_MS = 5_000;
 export type DispatchSkipLogReason = DispatchSkipReason | "insufficient-time";
+/** Worker attempt outcomes: the worker failure allowlist plus dispatcher-observed launch, signal, and timeout outcomes. */
+export type WorkerOutcomeReason =
+  | WorkerFailureCategory
+  | "signal"
+  | "timeout"
+  | "launch-failed";
 export type DispatcherDiagnostics = {
   noteSkip: (jobId: string, generation: string, reason: DispatchSkipLogReason) => void;
+  noteWorkerFailure: (jobId: string, generation: string, outcome: WorkerOutcomeReason) => void;
   endPass: () => void;
 };
-const SILENT_DIAGNOSTICS: DispatcherDiagnostics = { noteSkip: () => {}, endPass: () => {} };
+const SILENT_DIAGNOSTICS: DispatcherDiagnostics = { noteSkip: () => {}, noteWorkerFailure: () => {}, endPass: () => {} };
 
 /**
- * Rate-limited skip reporter. Detail lines list only UUIDs and a reason code;
- * summaries list only reason counts. Never logs paths, digests, file contents,
- * repository names, or error text.
+ * Rate-limited skip and worker-outcome reporter. Detail lines list only UUIDs
+ * and a reason code; summaries list only reason counts. Never logs paths,
+ * digests, file contents, repository names, or error text. Worker outcomes
+ * share the detail budget and are prefixed with worker_ in summaries.
  */
 export function createDispatchDiagnostics(
   write: (line: string) => void,
   now: () => number = Date.now,
 ): DispatcherDiagnostics {
   const WINDOW_MS = 60_000, MAX_DETAIL_PER_WINDOW = 5, SUMMARY_MS = 30_000;
-  let windowStart = now(), details = 0, lastSummary = 0, total = 0;
+  let windowStart = now(), details = 0, lastSummary = 0, total = 0, workerTotal = 0;
   const counts = new Map<string, number>();
+  const workerCounts = new Map<string, number>();
+  const detail = (line: string) => {
+    const at = now();
+    if (at - windowStart >= WINDOW_MS) {
+      windowStart = at;
+      details = 0;
+    }
+    if (details < MAX_DETAIL_PER_WINDOW) {
+      details++;
+      write(line);
+    }
+  };
   return {
     noteSkip(jobId, generation, reason) {
       total++;
       counts.set(reason, (counts.get(reason) ?? 0) + 1);
-      const at = now();
-      if (at - windowStart >= WINDOW_MS) {
-        windowStart = at;
-        details = 0;
-      }
-      if (details < MAX_DETAIL_PER_WINDOW) {
-        details++;
-        write(
-          `scanner-dispatcher: skip jobId=${jobId} generation=${generation} reason=${reason}\n`,
-        );
-      }
+      detail(
+        `scanner-dispatcher: skip jobId=${jobId} generation=${generation} reason=${reason}\n`,
+      );
+    },
+    noteWorkerFailure(jobId, generation, outcome) {
+      workerTotal++;
+      workerCounts.set(outcome, (workerCounts.get(outcome) ?? 0) + 1);
+      detail(
+        `scanner-dispatcher: worker jobId=${jobId} generation=${generation} outcome=${outcome}\n`,
+      );
     },
     endPass() {
-      if (total === 0) return;
+      if (total === 0 && workerTotal === 0) return;
       const at = now();
       if (at - lastSummary < SUMMARY_MS) return;
       lastSummary = at;
-      const summary = [...counts.entries()]
-        .sort(([a], [b]) => (a < b ? -1 : 1))
-        .map(([reason, count]) => `${reason}=${count}`)
+      const summary = [
+        ...[...counts.entries()].map(([reason, count]) => `${reason}=${count}`),
+        ...[...workerCounts.entries()].map(([outcome, count]) => `worker_${outcome}=${count}`),
+      ]
+        .sort()
         .join(" ");
-      const skipped = total;
+      const skipped = total, failed = workerTotal;
       total = 0;
+      workerTotal = 0;
       counts.clear();
-      write(`scanner-dispatcher: pass skipped=${skipped} ${summary}\n`);
+      workerCounts.clear();
+      write(`scanner-dispatcher: pass skipped=${skipped} worker_failed=${failed} ${summary}\n`);
     },
   };
 }
@@ -168,13 +193,19 @@ export function validateDispatcherConfig(config: DispatcherConfig): void {
   validateSpoolRoots(config.roots, config.owners);
 }
 
-/** One launch at a time. Persistent per-dispatch markers prevent retry after an ambiguous crash. */
+/**
+ * One launch at a time. Persistent per-dispatch markers prevent retry after an
+ * ambiguous crash. Per-attempt worker outcomes (launch failure, nonzero exit,
+ * signal, supervision timeout) are reported through diagnostics and return
+ * "failed" so the dispatcher survives a failed job; only dispatcher-internal
+ * errors (configuration, spool roots, inbox scan, launch-marker writes) throw.
+ */
 export async function dispatchOnce(
   config: DispatcherConfig,
   launch: Launch = spawn,
   now = Date.now(),
   diagnostics: DispatcherDiagnostics = SILENT_DIAGNOSTICS,
-): Promise<"idle" | "launched"> {
+): Promise<"idle" | "launched" | "failed"> {
   validateDispatcherConfig(config);
   const lock = path.join(config.roots.claims, ".dispatcher-active");
   try {
@@ -276,46 +307,51 @@ export async function dispatchOnce(
           stdio: "ignore",
         });
       } catch {
-        throw new Error("Scanner worker could not be launched.");
+        diagnostics.noteWorkerFailure(jobId, generation, "launch-failed");
+        diagnostics.endPass();
+        return "failed";
       }
 
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        let timedOut = false;
+      const outcome = await new Promise<WorkerOutcomeReason | undefined>(
+        (resolve) => {
+          let settled = false;
+          let timedOut = false;
 
-        const finish = (error?: Error) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
+          const finish = (result: WorkerOutcomeReason | undefined) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve(result);
+          };
 
-          if (error) reject(error);
-          else resolve();
-        };
+          const timer = setTimeout(() => {
+            timedOut = true;
+            child.kill("SIGKILL");
+            finish("timeout");
+          }, 95_000);
 
-        const timer = setTimeout(() => {
-          timedOut = true;
-          child.kill("SIGKILL");
-          finish(new Error("Scanner worker exceeded its execution deadline."));
-        }, 95_000);
+          child.once("error", () => {
+            finish("launch-failed");
+          });
 
-        child.once("error", () => {
-          finish(new Error("Scanner worker process failed to start."));
-        });
-
-        child.once("exit", (code, signal) => {
-          if (timedOut) {
-            finish(
-              new Error("Scanner worker exceeded its execution deadline."),
-            );
-          } else if (signal) {
-            finish(new Error("Scanner worker terminated unexpectedly."));
-          } else if (code !== 0) {
-            finish(new Error("Scanner worker exited unsuccessfully."));
-          } else {
-            finish();
-          }
-        });
-      });
+          child.once("exit", (code, signal) => {
+            if (timedOut) {
+              finish("timeout");
+            } else if (signal) {
+              finish("signal");
+            } else if (code !== 0) {
+              finish(workerCategoryFromExitCode(code));
+            } else {
+              finish(undefined);
+            }
+          });
+        },
+      );
+      if (outcome !== undefined) {
+        diagnostics.noteWorkerFailure(jobId, generation, outcome);
+        diagnostics.endPass();
+        return "failed";
+      }
       diagnostics.endPass();
       return "launched";
     }

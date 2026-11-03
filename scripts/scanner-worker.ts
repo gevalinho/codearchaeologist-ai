@@ -1,4 +1,4 @@
-import { runWorkerJob, assertWorkerEnvironment, type WorkerConfig } from "../src/lib/github-ingestion/scanner-worker";
+import { runWorkerJob, assertWorkerEnvironment, reportWorkerFailure, WORKER_EXIT_CODES, type WorkerConfig } from "../src/lib/github-ingestion/scanner-worker";
 import { validId } from "../src/lib/github-ingestion/spool";
 import path from "node:path";
 
@@ -8,7 +8,7 @@ function integer(name: string): number {
   return Number(value);
 }
 
-async function main() {
+async function main(): Promise<number> {
   assertWorkerEnvironment();
   if (process.argv.length !== 4) throw new Error("Scanner worker requires a job ID and generation.");
   const jobId = validId(process.argv[2]), generation = validId(process.argv[3]);
@@ -21,7 +21,12 @@ async function main() {
   };
   if (config.owners.webUid === config.owners.workerUid || config.owners.workerUid <= 0 || typeof process.getuid !== "function" || process.getuid() !== config.owners.workerUid) throw new Error("Scanner worker Unix identity is invalid.");
   process.umask(0o022); // Scanner bind mounts require non-root container read/traverse; spool files remain 0640.
-  await runWorkerJob(config, jobId, generation);
+  try {
+    await runWorkerJob(config, jobId, generation);
+    return 0;
+  } catch (error) {
+    return WORKER_EXIT_CODES[reportWorkerFailure(config, jobId, generation, error)];
+  }
 }
 
-main().catch(() => { process.exitCode = 1; });
+main().then(code => { process.exitCode = code; }, () => { process.exitCode = 1; });

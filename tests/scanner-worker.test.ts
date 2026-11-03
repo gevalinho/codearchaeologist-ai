@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 vi.mock("server-only", () => ({}));
-import { assertWorkerEnvironment, runWorkerJob, type WorkerConfig, type WorkerDependencies } from "../src/lib/github-ingestion/scanner-worker";
-import { cleanupWorkerSpool, markCancelled, publishClaimAcknowledgement, publishSnapshot, readClaimReceipt, readResult } from "../src/lib/github-ingestion/spool";
+import { assertWorkerEnvironment, classifyWorkerFailure, reportWorkerFailure, runWorkerJob, workerCategoryFromExitCode, WORKER_EXIT_CODES, type WorkerConfig, type WorkerDependencies } from "../src/lib/github-ingestion/scanner-worker";
+import { cleanupWorkerSpool, markCancelled, publishClaimAcknowledgement, publishSnapshot, readClaimReceipt, readResult, readWorkerFailure, WORKER_FAILURE_CATEGORIES } from "../src/lib/github-ingestion/spool";
 
 let root: string, config: WorkerConfig, job: string, generation: string;
 const source = [{ path: "src/Auth.php", bytes: Buffer.from("<?php class Auth {}") }];
@@ -70,5 +70,68 @@ describe("standalone scanner worker", () => {
     chmodSync(config.scanRoot, 0o755);
     await expect(runWorkerJob(config, job, generation, deps)).rejects.toThrow(/private/);
     expect(deps.available).not.toHaveBeenCalled();
+  });
+});
+
+describe("worker failure classification", () => {
+  it.each([
+    ["Scanner dispatch expired or was cancelled before acknowledgement.", "cancelled"],
+    ["Scanner dispatch expired or was cancelled during preparation.", "cancelled"],
+    ["Scanner dispatch expired or was cancelled before execution.", "cancelled"],
+    ["Scanner dispatch expired or was cancelled during execution.", "cancelled"],
+    ["GitHub analysis cancelled.", "cancelled"],
+    ["Dispatch cancelled during claim.", "cancelled"],
+    ["Result is stale or cancelled.", "cancelled"],
+    ["Invalid, stale, or cancelled dispatch.", "cancelled"],
+    ["Snapshot manifest integrity failed.", "snapshot-integrity"],
+    ["Source snapshot changed after claim.", "snapshot-integrity"],
+    ["Invalid claim acknowledgement.", "snapshot-integrity"],
+    ["Unsafe source file.", "snapshot-integrity"],
+    ["Malformed spool record.", "snapshot-integrity"],
+    ["Isolated scanner unavailable: Docker daemon cannot be reached.", "docker-unavailable"],
+    ["Isolated scanner unavailable: Docker seccomp enforcement could not be verified. Enable the built-in profile for scanner containers.", "docker-unavailable"],
+    ["Invalid scanner image identity.", "docker-unavailable"],
+    ["Isolated scanner failed. Check Docker availability and scanner limits.", "scan-failed"],
+    ["Isolated scanner exceeded its 30-second limit.", "scan-timeout"],
+    ["Claim is not acknowledged.", "result-rejected"],
+    ["Scanner result envelope exceeds limit.", "result-rejected"],
+    ["Isolated scanner cleanup could not be confirmed.", "cleanup-unconfirmed"],
+    ["Worker scan root must be private.", "internal"],
+    ["Spool writer identity mismatch.", "internal"],
+    ["Scanner worker environment contains web or provider credentials.", "internal"],
+  ])("classifies %s as %s", (message, category) => {
+    expect(classifyWorkerFailure(new Error(message))).toBe(category);
+  });
+
+  it("falls back to internal for system errors, unknown errors, and non-errors", () => {
+    expect(classifyWorkerFailure(Object.assign(new Error("ENOENT: no such file or directory, open '/spool/inbox/x'"), { code: "ENOENT" }))).toBe("internal");
+    expect(classifyWorkerFailure(new Error("boom"))).toBe("internal");
+    expect(classifyWorkerFailure(null)).toBe("internal");
+    expect(classifyWorkerFailure("string failure")).toBe("internal");
+    expect(classifyWorkerFailure(new Error("__proto__"))).toBe("internal");
+  });
+
+  it("round-trips every category through exit codes with an internal fallback", () => {
+    expect(new Set(Object.values(WORKER_EXIT_CODES)).size).toBe(WORKER_FAILURE_CATEGORIES.length);
+    for (const category of WORKER_FAILURE_CATEGORIES) {
+      expect(workerCategoryFromExitCode(WORKER_EXIT_CODES[category])).toBe(category);
+    }
+    expect(WORKER_EXIT_CODES.internal).toBe(1);
+    expect(workerCategoryFromExitCode(0)).toBe("internal");
+    expect(workerCategoryFromExitCode(99)).toBe("internal");
+    expect(workerCategoryFromExitCode(null)).toBe("internal");
+  });
+
+  it("publishes the classified category without throwing when publication is impossible", async () => {
+    const deps = mock(async () => { approve(); });
+    deps.scan = vi.fn(async () => { throw new Error("Isolated scanner exceeded its 30-second limit."); });
+    const failure = await runWorkerJob(config, job, generation, deps).then(() => null, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(reportWorkerFailure(config, job, generation, failure)).toBe("scan-timeout");
+    expect(readWorkerFailure(config.roots, config.owners, job, generation).category).toBe("scan-timeout");
+    expect(reportWorkerFailure(config, job, generation, new Error("boom"))).toBe("internal");
+    const unclaimed = { job: randomUUID(), generation: randomUUID() };
+    publishSnapshot(config.roots, config.owners, unclaimed.job, unclaimed.generation, source, Date.now() + 60_000);
+    expect(reportWorkerFailure(config, unclaimed.job, unclaimed.generation, new Error("boom"))).toBe("internal");
   });
 });
