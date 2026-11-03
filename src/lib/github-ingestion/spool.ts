@@ -119,16 +119,45 @@ export function isCancelled(roots: SpoolRoots, owners: SpoolOwners, jobId: strin
   validateSpoolRoots(roots, owners); return !current(roots, owners, jobId, generation) || cancelled(roots, owners, jobId, generation);
 }
 
+export type DispatchSkipReason = "expired" | "cancelled" | "stale-active" | "manifest-integrity" | "unsafe-snapshot" | "invalid";
+export function dispatchSkipReason(error: unknown): DispatchSkipReason {
+  if (error instanceof Error) {
+    const code = (error as Error & { code?: unknown }).code;
+    if (code === "expired" || code === "cancelled" || code === "stale-active" || code === "manifest-integrity" || code === "unsafe-snapshot") return code;
+  }
+  return "invalid";
+}
+function labelSkip<T>(error: T, reason: DispatchSkipReason): T {
+  if (error instanceof Error) (error as Error & { code?: DispatchSkipReason }).code = reason;
+  return error;
+}
+
 /** Worker-side preflight for a dispatcher. The single-job worker repeats full snapshot verification. */
 export function inspectPendingDispatch(roots: SpoolRoots, owners: SpoolOwners, jobId: string, generation: string, now = Date.now()): Dispatch {
   validateSpoolRoots(roots, owners); actor(owners.workerUid); name(jobId, generation);
-  const value = parseJson(readSafe(dispatchPath(roots, jobId, generation), DISPATCH_LIMIT, owners.webUid, owners.inboxGid));
-  if (!record(value) || !exact(value, "deadline,generation,jobId,manifestSha256,version") || value.version !== 1 || value.jobId !== jobId || value.generation !== generation || typeof value.manifestSha256 !== "string" || !HASH.test(value.manifestSha256) || !Number.isSafeInteger(value.deadline) || (value.deadline as number) <= now || (value.deadline as number) > now + 90_000 || isCancelled(roots, owners, jobId, generation)) throw new Error("Invalid, expired, or cancelled dispatch.");
+  let value: unknown;
+  try {
+    value = parseJson(readSafe(dispatchPath(roots, jobId, generation), DISPATCH_LIMIT, owners.webUid, owners.inboxGid));
+  } catch (error) { throw labelSkip(error, "invalid"); }
+  if (!record(value) || !exact(value, "deadline,generation,jobId,manifestSha256,version") || value.version !== 1 || value.jobId !== jobId || value.generation !== generation || typeof value.manifestSha256 !== "string" || !HASH.test(value.manifestSha256) || !Number.isSafeInteger(value.deadline)) throw labelSkip(new Error("Invalid, expired, or cancelled dispatch."), "invalid");
+  if ((value.deadline as number) <= now) throw labelSkip(new Error("Invalid, expired, or cancelled dispatch."), "expired");
+  if ((value.deadline as number) > now + 90_000) throw labelSkip(new Error("Invalid, expired, or cancelled dispatch."), "invalid");
+  if (!current(roots, owners, jobId, generation)) throw labelSkip(new Error("Invalid, expired, or cancelled dispatch."), "stale-active");
+  try {
+    if (cancelled(roots, owners, jobId, generation)) throw labelSkip(new Error("Invalid, expired, or cancelled dispatch."), "cancelled");
+  } catch (error) { throw labelSkip(error, (error as Error & { code?: unknown }).code === "cancelled" ? "cancelled" : "invalid"); }
   const snapshot = snapshotPath(roots, jobId, generation);
-  directory(snapshot, owners.webUid, owners.inboxGid);
-  const manifest = readSafe(path.join(snapshot, "manifest.json"), MANIFEST_LIMIT, owners.webUid, owners.inboxGid);
-  if (digest(manifest) !== value.manifestSha256) throw new Error("Snapshot manifest integrity failed.");
-  parseManifest(manifest, jobId, generation);
+  try {
+    directory(snapshot, owners.webUid, owners.inboxGid);
+  } catch (error) { throw labelSkip(error, "unsafe-snapshot"); }
+  let manifest: Buffer;
+  try {
+    manifest = readSafe(path.join(snapshot, "manifest.json"), MANIFEST_LIMIT, owners.webUid, owners.inboxGid);
+  } catch (error) { throw labelSkip(error, "unsafe-snapshot"); }
+  if (digest(manifest) !== (value as Dispatch).manifestSha256) throw labelSkip(new Error("Snapshot manifest integrity failed."), "manifest-integrity");
+  try {
+    parseManifest(manifest, jobId, generation);
+  } catch (error) { throw labelSkip(error, "manifest-integrity"); }
   return value as Dispatch;
 }
 

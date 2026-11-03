@@ -1,4 +1,5 @@
-import { dispatchOnce, type DispatcherConfig } from "../src/lib/github-ingestion/scanner-dispatcher";
+import { spawn } from "node:child_process";
+import { createDispatchDiagnostics, dispatchOnce, type DispatcherConfig } from "../src/lib/github-ingestion/scanner-dispatcher";
 import { assertWorkerEnvironment } from "../src/lib/github-ingestion/scanner-worker";
 import path from "node:path";
 
@@ -19,10 +20,11 @@ async function main() {
     owners: { webUid: integer("CODEARCH_WEB_UID"), workerUid: integer("CODEARCH_WORKER_UID"), workerGid: integer("CODEARCH_WORKER_GID"), inboxGid: integer("CODEARCH_INBOX_GID"), outboxGid: integer("CODEARCH_OUTBOX_GID") },
   };
   process.umask(0o027);
+  const diagnostics = createDispatchDiagnostics(line => process.stderr.write(line));
   while (true) {
-    await dispatchOnce(config);
+    await dispatchOnce(config, spawn, Date.now(), diagnostics);
     await new Promise(resolve => setTimeout(resolve, 500));
   }
 }
 
-main().catch(() => { process.exitCode = 1; });
+main().catch(() => { process.stderr.write("scanner-dispatcher: fatal dispatch error; exiting\n"); process.exitCode = 1; });

@@ -9,9 +9,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import {
+  dispatchSkipReason,
   inspectPendingDispatch,
   validId,
   validateSpoolRoots,
+  type DispatchSkipReason,
   type SpoolOwners,
   type SpoolRoots,
 } from "./spool";
@@ -31,6 +33,70 @@ export type Launch = (
 ) => ChildProcess;
 const marker =
   /^([a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})\.([a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})\.json$/;
+
+/**
+ * Minimum remaining dispatch lifetime for a launch attempt. Below this horizon a
+ * claim → acknowledgement → scan → result cycle cannot complete before the dispatch
+ * deadline: the handshake alone needs a worker spawn plus the web 100ms claim poll,
+ * SQLite acknowledgement, and worker 200ms acknowledgement poll (about one second in
+ * the best case, before Docker availability probes and the scan itself). Five seconds
+ * is five times that handshake floor with margin, far below any viable scan, so a
+ * guarded launch is provably doomed: the job fails at its deadline either way, and
+ * skipping avoids a wasted spawn plus a misleading single-use launch marker while
+ * leaving the lane free for viable dispatches.
+ */
+export const MIN_LAUNCH_REMAINING_MS = 5_000;
+export type DispatchSkipLogReason = DispatchSkipReason | "insufficient-time";
+export type DispatcherDiagnostics = {
+  noteSkip: (jobId: string, generation: string, reason: DispatchSkipLogReason) => void;
+  endPass: () => void;
+};
+const SILENT_DIAGNOSTICS: DispatcherDiagnostics = { noteSkip: () => {}, endPass: () => {} };
+
+/**
+ * Rate-limited skip reporter. Detail lines list only UUIDs and a reason code;
+ * summaries list only reason counts. Never logs paths, digests, file contents,
+ * repository names, or error text.
+ */
+export function createDispatchDiagnostics(
+  write: (line: string) => void,
+  now: () => number = Date.now,
+): DispatcherDiagnostics {
+  const WINDOW_MS = 60_000, MAX_DETAIL_PER_WINDOW = 5, SUMMARY_MS = 30_000;
+  let windowStart = now(), details = 0, lastSummary = 0, total = 0;
+  const counts = new Map<string, number>();
+  return {
+    noteSkip(jobId, generation, reason) {
+      total++;
+      counts.set(reason, (counts.get(reason) ?? 0) + 1);
+      const at = now();
+      if (at - windowStart >= WINDOW_MS) {
+        windowStart = at;
+        details = 0;
+      }
+      if (details < MAX_DETAIL_PER_WINDOW) {
+        details++;
+        write(
+          `scanner-dispatcher: skip jobId=${jobId} generation=${generation} reason=${reason}\n`,
+        );
+      }
+    },
+    endPass() {
+      if (total === 0) return;
+      const at = now();
+      if (at - lastSummary < SUMMARY_MS) return;
+      lastSummary = at;
+      const summary = [...counts.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([reason, count]) => `${reason}=${count}`)
+        .join(" ");
+      const skipped = total;
+      total = 0;
+      counts.clear();
+      write(`scanner-dispatcher: pass skipped=${skipped} ${summary}\n`);
+    },
+  };
+}
 
 function canonicalDirectory(value: string): void {
   if (
@@ -107,6 +173,7 @@ export async function dispatchOnce(
   config: DispatcherConfig,
   launch: Launch = spawn,
   now = Date.now(),
+  diagnostics: DispatcherDiagnostics = SILENT_DIAGNOSTICS,
 ): Promise<"idle" | "launched"> {
   validateDispatcherConfig(config);
   const lock = path.join(config.roots.claims, ".dispatcher-active");
@@ -120,15 +187,13 @@ export async function dispatchOnce(
     const names = readdirSync(config.roots.inbox);
     if (names.length > 1_000)
       throw new Error("Dispatcher inbox exceeds entry limit.");
+    const candidates: { jobId: string; generation: string; deadline: number }[] =
+      [];
     for (const filename of names.sort()) {
       const match = marker.exec(filename);
       if (!match) continue;
       const jobId = validId(match[1]),
         generation = validId(match[2]);
-      const launchMarker = path.join(
-        config.roots.claims,
-        `${jobId}.${generation}.launch`,
-      );
       if (
         readdirSync(config.roots.claims).includes(`${jobId}.${generation}`) ||
         readdirSync(config.roots.claims).includes(
@@ -137,22 +202,63 @@ export async function dispatchOnce(
       )
         continue;
       try {
-        inspectPendingDispatch(
+        const dispatch = inspectPendingDispatch(
           config.roots,
           config.owners,
           jobId,
           generation,
           now,
         );
-      } catch {
+        candidates.push({
+          jobId,
+          generation,
+          deadline: dispatch.deadline,
+        });
+      } catch (error) {
+        diagnostics.noteSkip(jobId, generation, dispatchSkipReason(error));
         continue;
       }
+    }
+    candidates.sort((a, b) =>
+      a.deadline === b.deadline
+        ? a.jobId === b.jobId
+          ? a.generation < b.generation
+            ? -1
+            : 1
+          : a.jobId < b.jobId
+            ? -1
+            : 1
+        : a.deadline - b.deadline,
+    );
+    let chosen: { jobId: string; generation: string } | undefined;
+    for (const candidate of candidates) {
+      if (candidate.deadline - now < MIN_LAUNCH_REMAINING_MS) {
+        diagnostics.noteSkip(
+          candidate.jobId,
+          candidate.generation,
+          "insufficient-time",
+        );
+        continue;
+      }
+      const launchMarker = path.join(
+        config.roots.claims,
+        `${candidate.jobId}.${candidate.generation}.launch`,
+      );
       try {
         mkdirSync(launchMarker, { mode: 0o700 });
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
         throw error;
       }
+      chosen = candidate;
+      break;
+    }
+    if (!chosen) {
+      diagnostics.endPass();
+      return "idle";
+    }
+    {
+      const { jobId, generation } = chosen;
       const args = [
         "--experimental-transform-types",
         "--import",
@@ -210,9 +316,9 @@ export async function dispatchOnce(
           }
         });
       });
+      diagnostics.endPass();
       return "launched";
     }
-    return "idle";
   } finally {
     rmSync(lock, { recursive: true, force: true });
   }

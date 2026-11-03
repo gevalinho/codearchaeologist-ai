@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 vi.mock("server-only", () => ({}));
-import { acknowledgedClaim, claimDispatch, cleanupWebSpool, cleanupWorkerSpool, isCancelled, markCancelled, publishClaimAcknowledgement, publishResult, publishSnapshot, publishWorkerHeartbeat, readClaimReceipt, readResult, readWorkerHeartbeat, validId, type SpoolOwners, type SpoolRoots } from "../src/lib/github-ingestion/spool";
+import { acknowledgedClaim, claimDispatch, cleanupWebSpool, cleanupWorkerSpool, dispatchSkipReason, inspectPendingDispatch, isCancelled, markCancelled, publishClaimAcknowledgement, publishResult, publishSnapshot, publishWorkerHeartbeat, readClaimReceipt, readResult, readWorkerHeartbeat, validId, type SpoolOwners, type SpoolRoots } from "../src/lib/github-ingestion/spool";
 
 let root: string, roots: SpoolRoots, owners: SpoolOwners;
 const id = () => randomUUID();
@@ -135,5 +135,56 @@ describe("isolated scanner spool foundation", () => {
     const alias = path.join(root, "alias");
     symlinkSync(roots.inbox, alias);
     expect(() => isCancelled({ ...roots, inbox: alias }, owners, job, generation)).toThrow(/permissions/);
+  });
+});
+
+describe("dispatcher preflight skip reasons", () => {
+  const reasonOf = (job: string, generation: string, now?: number) => {
+    try {
+      inspectPendingDispatch(roots, owners, job, generation, now);
+    } catch (error) {
+      return dispatchSkipReason(error);
+    }
+    return "accepted";
+  };
+  it("accepts a valid dispatch and labels expired, cancelled, and stale-active dispatches", () => {
+    const job = id(), generation = id();
+    const dispatch = publishSnapshot(roots, owners, job, generation, source(), Date.now() + 60_000);
+    expect(reasonOf(job, generation)).toBe("accepted");
+    expect(reasonOf(job, generation, dispatch.deadline + 1)).toBe("expired");
+    expect(() => inspectPendingDispatch(roots, owners, job, generation, dispatch.deadline + 1)).toThrow("Invalid, expired, or cancelled dispatch.");
+    markCancelled(roots, owners, job, generation);
+    expect(reasonOf(job, generation)).toBe("cancelled");
+    const replacement = id();
+    publishSnapshot(roots, owners, job, replacement, source(), Date.now() + 60_000);
+    expect(reasonOf(job, generation)).toBe("stale-active");
+    expect(reasonOf(job, replacement)).toBe("accepted");
+    const staleJob = id(), staleFirst = id();
+    publishSnapshot(roots, owners, staleJob, staleFirst, source(), Date.now() + 60_000);
+    publishSnapshot(roots, owners, staleJob, id(), source(), Date.now() + 60_000);
+    expect(reasonOf(staleJob, staleFirst)).toBe("stale-active");
+  });
+  it("labels manifest-integrity, unsafe-snapshot, and invalid dispatches without changing messages", () => {
+    const tampered = id(), tamperedGeneration = id();
+    publishSnapshot(roots, owners, tampered, tamperedGeneration, source(), Date.now() + 60_000);
+    writeFileSync(path.join(snapshot(tampered, tamperedGeneration), "manifest.json"), JSON.stringify({ version: 1, tampered: true }));
+    expect(reasonOf(tampered, tamperedGeneration)).toBe("manifest-integrity");
+    expect(() => inspectPendingDispatch(roots, owners, tampered, tamperedGeneration)).toThrow("Snapshot manifest integrity failed.");
+    const unsafe = id(), unsafeGeneration = id();
+    publishSnapshot(roots, owners, unsafe, unsafeGeneration, source(), Date.now() + 60_000);
+    chmodSync(snapshot(unsafe, unsafeGeneration), 0o777);
+    try {
+      expect(reasonOf(unsafe, unsafeGeneration)).toBe("unsafe-snapshot");
+    } finally {
+      chmodSync(snapshot(unsafe, unsafeGeneration), 0o750);
+    }
+    const malformed = id(), malformedGeneration = id();
+    writeFileSync(path.join(roots.inbox, `${malformed}.${malformedGeneration}.json`), "{bad json", { mode: 0o640 });
+    expect(reasonOf(malformed, malformedGeneration)).toBe("invalid");
+    const future = id(), futureGeneration = id();
+    publishSnapshot(roots, owners, future, futureGeneration, source(), Date.now() + 200_000);
+    expect(reasonOf(future, futureGeneration)).toBe("invalid");
+    expect(dispatchSkipReason(new Error("boom"))).toBe("invalid");
+    expect(dispatchSkipReason(null)).toBe("invalid");
   });
 });
