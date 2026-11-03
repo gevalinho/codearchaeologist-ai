@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -10,14 +10,17 @@ const { spawnMock } = vi.hoisted(() => ({
 
 vi.mock("server-only", () => ({}));
 
-vi.mock("node:child_process", () => ({
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...((await importOriginal()) as Record<string, unknown>),
   spawn: spawnMock,
 }));
 
+import { execFileSync } from "node:child_process";
 import {
   dockerCommand,
   runIsolatedScanner,
   scannerDockerEnvironment,
+  stageRunner,
   type DockerCommand,
 } from "../src/lib/github-ingestion/sandbox";
 
@@ -257,6 +260,24 @@ describe("isolated scanner failure modes", () => {
       await expect(runIsolatedScanner(root, image, controller.signal, absent)).rejects.toThrow(
         "GitHub analysis cancelled.",
       );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("isolated runner staging", () => {
+  it("stages a self-contained runner that scans without repository node_modules", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "codearch-runner-closure-"));
+    try {
+      mkdirSync(path.join(root, "repo/application/controllers"), { recursive: true });
+      writeFileSync(path.join(root, "repo/application/controllers/Gallery.php"), "<?php class Gallery extends CI_Controller { public function index() {} }\n");
+      mkdirSync(path.join(root, "repo/assets/js"), { recursive: true });
+      writeFileSync(path.join(root, "repo/assets/js/gallery.js"), "export function renderGallery(items) { return items.length; }\n");
+      expect(await stageRunner(root)).toBe(path.join(root, "runner"));
+      const script = `import("./runner/src/lib/archaeology/scanner.ts").then(async m => { const g = await m.scanRepository(${JSON.stringify(path.join(root, "repo"))}); console.log("files=" + g.scan.fileCount + " nodes=" + g.nodes.length); })`;
+      const output = execFileSync(process.execPath, ["--experimental-transform-types", "--import", "./runner/scripts/register-types.mjs", "--eval", script], { cwd: root, timeout: 60_000, encoding: "utf8" });
+      expect(output.trim()).toBe("files=2 nodes=5");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

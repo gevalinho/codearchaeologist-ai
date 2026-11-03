@@ -1,7 +1,7 @@
 import "server-only";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, copyFile, mkdir } from "node:fs/promises";
+import { chmod, copyFile, cp, lstat, mkdir, readdir } from "node:fs/promises";
 import {
   closeSync,
   constants,
@@ -21,6 +21,17 @@ const trustedFiles = [
   "src/lib/archaeology/scanner-core.ts",
   "src/lib/archaeology/rule-patterns.ts",
   "src/lib/archaeology/selection.ts",
+  "src/lib/archaeology/javascript-analysis.ts",
+  "src/lib/archaeology/cross-stack.ts",
+  "src/lib/archaeology/php/parser.ts",
+  "src/lib/archaeology/php/route-adapters.ts",
+];
+const trustedPackages = [
+  "node_modules/@babel/parser",
+  "node_modules/@babel/types",
+  "node_modules/@babel/helper-string-parser",
+  "node_modules/@babel/helper-validator-identifier",
+  "node_modules/php-parser",
 ];
 type CommandResult = {
   exitCode: number | null;
@@ -304,13 +315,32 @@ export async function scannerAvailable(
   return image.stdout.trim();
 }
 
-async function stageRunner(root: string) {
+async function readableTree(target: string): Promise<void> {
+  const info = await lstat(target);
+  if (info.isSymbolicLink()) return;
+  if (!info.isDirectory()) {
+    await chmod(target, 0o644);
+    return;
+  }
+  await chmod(target, 0o755);
+  for (const entry of await readdir(target))
+    await readableTree(path.join(target, entry));
+}
+
+/** Stage the exact runtime closure the container entrypoint imports: first-party modules plus the named npm packages. Exported for regression tests. */
+export async function stageRunner(root: string) {
   const runner = path.join(root, "runner");
   for (const relative of trustedFiles) {
     const target = path.join(runner, relative);
     await mkdir(path.dirname(target), { recursive: true, mode: 0o755 });
     await copyFile(path.resolve(process.cwd(), relative), target);
     await chmod(target, 0o644);
+  }
+  for (const relative of trustedPackages) {
+    const target = path.join(runner, relative);
+    await mkdir(path.dirname(target), { recursive: true, mode: 0o755 });
+    await cp(path.resolve(process.cwd(), relative), target, { recursive: true });
+    await readableTree(target);
   }
   return runner;
 }
