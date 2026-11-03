@@ -40,17 +40,33 @@ function writeNew(file: string, bytes: Buffer, mode: number): void {
   try { writeFileSync(fd, bytes); fsyncSync(fd); } finally { closeSync(fd); }
 }
 function publishFile(dir: string, target: string, bytes: Buffer, mode: number): void {
+  // Atomic no-overwrite publication: link() fails EEXIST when the target
+  // exists and publishes complete content. The temp name is removed
+  // immediately so the transient nlink == 2 window lasts microseconds;
+  // concurrent readers tolerate exactly that sole-anomaly state in readSafe().
   const temporary = path.join(dir, `.${randomUUID()}.tmp`);
-  try { writeNew(temporary, bytes, mode); linkSync(temporary, target); fsyncDirectory(dir); }
+  try { writeNew(temporary, bytes, mode); linkSync(temporary, target); unlinkSync(temporary); }
   finally { rmSync(temporary, { force: true }); fsyncDirectory(dir); }
 }
+export const READ_SAFE_NLINK_RETRIES = 5000;
 function readSafe(file: string, maxBytes: number, uid: number, gid: number, allowEmpty = false): Buffer {
-  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const info = fstatSync(fd);
-    if (!info.isFile() || info.nlink !== 1 || info.uid !== uid || info.gid !== gid || info.mode & 0o027 || info.size < (allowEmpty ? 0 : 1) || info.size > maxBytes) throw new Error("Unsafe spool file.");
-    return readFileSync(fd);
-  } finally { closeSync(fd); }
+  // A file whose sole anomaly is nlink !== 1 may be inside publishFile()'s
+  // microsecond link/unlink window; re-open and re-check a bounded number of
+  // times. Anything else (or a link count that never settles) still fails.
+  // Bytes are read only from the fd whose own fstat showed nlink == 1, and the
+  // publisher runs in an independent process, so spinning never blocks it.
+  for (let attempt = 0; ; attempt++) {
+    const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const info = fstatSync(fd);
+      const valid = info.isFile() && info.uid === uid && info.gid === gid && !(info.mode & 0o027) && info.size >= (allowEmpty ? 0 : 1) && info.size <= maxBytes;
+      if (info.nlink === 1) {
+        if (!valid) throw new Error("Unsafe spool file.");
+        return readFileSync(fd);
+      }
+      if (!valid || attempt >= READ_SAFE_NLINK_RETRIES) throw new Error("Unsafe spool file.");
+    } finally { closeSync(fd); }
+  }
 }
 function parseJson(bytes: Buffer): unknown { try { return JSON.parse(bytes.toString("utf8")); } catch { throw new Error("Malformed spool record."); } }
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value); }
