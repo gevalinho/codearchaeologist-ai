@@ -6,6 +6,29 @@ CodeArchaeologist AI scans repositories into structural architecture graphs and 
 
 Built for the **Meta AI Developer Hackathon — Indie Developer Track: Push the Frontier**.
 
+## 🏆 Hackathon Judges — Quick Start
+
+`main` is the official working submission branch. The repository contains historical development commits, but there is no need to switch branches or check out older releases.
+
+The deployed application runs on AWS behind Nginx; Baseten provides model inference. Production runs release `2549ee6`; later commits (including this guide) are documentation only and were not deployed to production.
+
+**Two-minute walkthrough** (excluding scan processing time):
+
+1. Open the live application: https://codearchaeologist.theconduitbox.com
+2. Choose **Analyze GitHub Repository ↗**, then choose **Connect GitHub ↗** and sign in (required before a public scan).
+3. In **Repository URL**, paste `https://github.com/bcit-ci/CodeIgniter` and choose **Analyze repository ↗**.
+4. Wait for the GitHub repository investigation progress to finish and the workspace to load.
+5. Explore the workspace sections: **Overview**, **Architecture** (including **Explore architecture graph ↗** and the **Module explorer**), **Workflows** (features, **Business rules**, proposals), and **Evidence** (**Relationships** and source references).
+6. Open the **Assistant** (✦ activity-bar launcher), stay in **Chat** mode, paste a question below into **Ask a question…**, and choose **Send**.
+7. Inspect each answer's evidence-ID chips (`id · path:line`) and the partial-coverage and uncertainty disclosures.
+
+**Example questions to copy:**
+
+- **Architecture:** "Explain the architecture of this repository. Identify the main components and their relationships using the available source evidence."
+- **Business rules:** "What business rules or workflows can be identified from the analyzed code? Distinguish directly observed behavior from inferred findings."
+
+**What makes this different:** deterministic structural analysis (not bare LLM guessing); isolated GitHub repository scanning; evidence-grounded Meta Muse Spark reasoning via Baseten; validated source-file and line-number references; explicit uncertainty and partial-coverage disclosures; and autonomous repository investigation.
+
 ## 🎯 Problem Statement
 
 Undocumented legacy systems hide critical knowledge: architecture nobody mapped, dependencies nobody traced, business rules buried in aging code, and workflows only former developers understood. Traditional tools report syntax and vulnerabilities but rarely explain *why* software behaves as it does — and AI assistants without grounding confidently invent files, behavior, and citations that do not exist.
